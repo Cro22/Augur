@@ -2,8 +2,8 @@
 //
 // Subcommands land one hito at a time (see SPEC.md). Implemented so far:
 //
-//	augur proxy       — OpenAI-compatible recording proxy (Hito 1)
-//	augur aggregate   — trace + pricing → per-scenario cost distribution (Hito 2)
+//	augur proxy — OpenAI-compatible recording proxy (Hito 1)
+//	augur aggregate — trace + pricing → per-scenario cost distribution (Hito 2)
 //
 // Still to come: runner (Hito 2), project (Hito 3), gate (Hito 4).
 package main
