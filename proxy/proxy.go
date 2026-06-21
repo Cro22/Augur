@@ -7,8 +7,10 @@
 // SPEC.md: it is framework- and language-agnostic and records the real call
 // graph (retries, tool-loop fan-out) exactly as the agent emits it.
 //
-// This file implements the NON-STREAMING path. Streaming (SSE with
-// stream_options.include_usage) is a follow-up within Hito 1.
+// This file implements the non-streaming path and the shared request plumbing;
+// the streaming (SSE) path lives in proxy_stream.go. Both converge on
+// parseUsageJSON for token accounting, so streaming and non-streaming totals
+// reconcile by construction.
 package proxy
 
 import (
@@ -103,17 +105,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	latency := s.now().Sub(start)
-	if err != nil {
-		http.Error(w, "augur proxy: reading upstream response: "+err.Error(), http.StatusBadGateway)
-		return
+	// Dispatch on the response shape. A streamed (SSE) body must be relayed
+	// chunk-by-chunk so the agent sees tokens in real time; a regular JSON body
+	// is read in full. Both extract usage the same way, so totals reconcile.
+	var (
+		usage     oaiUsage
+		respModel string
+		ok        bool
+	)
+	if isEventStream(resp.Header) {
+		usage, respModel = s.streamResponse(w, resp)
+	} else if usage, respModel, ok = s.bufferResponse(w, resp); !ok {
+		return // bufferResponse already wrote an error to the client
 	}
+	latency := s.now().Sub(start)
 
 	// Record the call. Parse failures (a non-JSON body, an error response with
 	// no usage) yield zero tokens but the row is still written — a burned-but-
 	// failed call is precisely the surprise the trace exists to surface.
-	usage, respModel := usageFromResponse(respBody)
 	model := reqModel
 	if model == "" {
 		model = respModel
@@ -136,11 +145,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// must be loud: a silently dropped row means an under-counted bill.
 		fmt.Printf("augur proxy: WARNING trace write failed: %v\n", err)
 	}
+}
 
-	// Pass the upstream response through unchanged.
+// bufferResponse relays a non-streaming response: it reads the whole body,
+// copies headers/status, writes the body through unchanged, and parses usage.
+// It returns ok=false (after writing a 502) only if the upstream body cannot be
+// read — in which case the caller must not record a row.
+func (s *Server) bufferResponse(w http.ResponseWriter, resp *http.Response) (oaiUsage, string, bool) {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, "augur proxy: reading upstream response: "+err.Error(), http.StatusBadGateway)
+		return oaiUsage{}, "", false
+	}
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(respBody)
+	_, _ = w.Write(body)
+
+	usage, _, model := parseUsageJSON(body)
+	return usage, model, true
 }
 
 // buildUpstreamRequest clones the inbound request onto the upstream base URL,
@@ -175,13 +197,16 @@ type oaiUsage struct {
 	CachedTokens int
 }
 
-// usageFromResponse extracts token usage and the resolved model from a
-// non-streaming OpenAI-compatible response body. Missing/invalid usage yields a
-// zero oaiUsage (and the row is still recorded by the caller).
-func usageFromResponse(body []byte) (oaiUsage, string) {
+// parseUsageJSON extracts token usage and the resolved model from one
+// OpenAI-compatible JSON object — a full non-streaming response body or a single
+// streamed chunk's payload. usage is a pointer in the wire shape so we can tell
+// "no usage block" (every streamed chunk before the last) from "usage with zero
+// tokens": hasUsage is false in the former. Both the buffered and streaming
+// paths funnel through here so their accounting cannot drift apart.
+func parseUsageJSON(data []byte) (u oaiUsage, hasUsage bool, model string) {
 	var parsed struct {
 		Model string `json:"model"`
-		Usage struct {
+		Usage *struct {
 			PromptTokens        int `json:"prompt_tokens"`
 			CompletionTokens    int `json:"completion_tokens"`
 			PromptTokensDetails struct {
@@ -189,14 +214,24 @@ func usageFromResponse(body []byte) (oaiUsage, string) {
 			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return oaiUsage{}, ""
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return oaiUsage{}, false, ""
+	}
+	if parsed.Usage == nil {
+		return oaiUsage{}, false, parsed.Model
 	}
 	return oaiUsage{
 		InputTokens:  parsed.Usage.PromptTokens,
 		OutputTokens: parsed.Usage.CompletionTokens,
 		CachedTokens: parsed.Usage.PromptTokensDetails.CachedTokens,
-	}, parsed.Model
+	}, true, parsed.Model
+}
+
+// usageFromResponse is a thin wrapper over parseUsageJSON for the non-streaming
+// path and tests.
+func usageFromResponse(body []byte) (oaiUsage, string) {
+	u, _, model := parseUsageJSON(body)
+	return u, model
 }
 
 // modelFromRequest reads the "model" field from an OpenAI-compatible request
