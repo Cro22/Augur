@@ -142,6 +142,28 @@ augur gate --traffic traffic.yaml --budget budget.yaml
 
 `augur gate` is the one you wire into CI.
 
+### Record once, replay for free
+
+Running the agent against the real provider on every CI push spends real tokens.
+Record the responses once, then replay them — `augur run --replay` re-executes
+the agent against the recorded responses and regenerates the trace **without
+contacting the provider**:
+
+```sh
+# Once (locally or nightly), against the real provider:
+augur run --scenarios scenarios.yaml --record cassette.jsonl
+
+# In CI, on every push — zero tokens spent:
+augur run --scenarios scenarios.yaml --replay cassette.jsonl --trace trace.jsonl
+augur gate --traffic traffic.yaml --budget budget.yaml
+```
+
+Because replay re-runs the *agent* (not just the trace), a cost regression from
+an agent code change still surfaces — exercised against the old responses, for
+free. Commit `cassette.jsonl` alongside your scenarios. (A call the agent makes
+that wasn't recorded is a replay miss — reported loudly, so divergence from the
+recording never passes silently.)
+
 ---
 
 ## Design decisions
@@ -182,10 +204,11 @@ dependency is `gopkg.in/yaml.v3`):
 | Hito 2 | scenario runner + per-scenario aggregation |
 | Hito 3 | projection engine with bootstrap confidence intervals |
 | Hito 4 | budget gate + Markdown/JSON report + CI exit codes |
+| Hito 5 | record-once/replay cassette to cut CI token cost (`--record`/`--replay`) |
 
 **Roadmap (stretch, each independently shippable):** GitHub Action wrapper •
-what-if multiplier knobs • record-once/replay to cut CI token cost • self-hosted
-TCO mode • a Python output-length prediction sidecar.
+what-if multiplier knobs • self-hosted TCO mode • a Python output-length
+prediction sidecar.
 
 See [`SPEC.md`](SPEC.md) for the full design.
 
