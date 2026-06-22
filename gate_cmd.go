@@ -7,7 +7,6 @@ import (
 	"os"
 
 	"augur/aggregate"
-	"augur/cost"
 	"augur/gate"
 	"augur/project"
 	"augur/trace"
@@ -21,6 +20,7 @@ func runGate(args []string) error {
 	fs := flag.NewFlagSet("gate", flag.ContinueOnError)
 	tracePath := fs.String("trace", "trace.jsonl", "path to the cost trace (JSONL)")
 	pricingPath := fs.String("pricing", "pricing.yaml", "path to the pricing snapshot")
+	tcoPath := fs.String("tco", "", "derive pricing from a self-hosted TCO config instead of -pricing")
 	trafficPath := fs.String("traffic", "traffic.yaml", "path to the traffic profile")
 	budgetPath := fs.String("budget", "budget.yaml", "path to the budget thresholds")
 	reportMD := fs.String("report-md", "report.md", "path to write the Markdown report (empty to skip)")
@@ -38,7 +38,7 @@ func runGate(args []string) error {
 	if err != nil {
 		return err
 	}
-	pricing, err := cost.LoadPricing(*pricingPath)
+	pricing, err := resolvePricing(*pricingPath, *tcoPath)
 	if err != nil {
 		return err
 	}

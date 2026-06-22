@@ -7,7 +7,6 @@ import (
 	"os"
 
 	"augur/aggregate"
-	"augur/cost"
 	"augur/trace"
 )
 
@@ -18,6 +17,7 @@ func runAggregate(args []string) error {
 	fs := flag.NewFlagSet("aggregate", flag.ContinueOnError)
 	tracePath := fs.String("trace", "trace.jsonl", "path to the cost trace (JSONL) to aggregate")
 	pricingPath := fs.String("pricing", "pricing.yaml", "path to the pricing snapshot")
+	tcoPath := fs.String("tco", "", "derive pricing from a self-hosted TCO config instead of -pricing")
 	asJSON := fs.Bool("json", false, "emit the aggregation as JSON instead of a table")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -34,7 +34,7 @@ func runAggregate(args []string) error {
 		return err
 	}
 
-	pricing, err := cost.LoadPricing(*pricingPath)
+	pricing, err := resolvePricing(*pricingPath, *tcoPath)
 	if err != nil {
 		return err
 	}

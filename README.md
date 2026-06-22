@@ -182,6 +182,21 @@ Retries and fan-out scale the whole call (more calls); context growth inflates
 only the prompt side, not the completion — so the model reflects *which* driver
 moved, not a flat fudge factor.
 
+### Self-hosted models (TCO)
+
+For a model you run yourself there's no per-token API price — you pay for an
+instance by the hour. Describe the deployment in `tco.yaml` (instance $/hr,
+serving throughput, utilization) and Augur derives the effective $/Mtok:
+
+```sh
+augur tco --tco tco.yaml          # show the derived effective $/Mtok
+augur gate --tco tco.yaml ...     # cost the trace against self-hosted pricing
+```
+
+`--tco` is accepted by `aggregate`, `project`, and `gate` as an alternative to
+`--pricing`. Utilization is the honest part: you pay for the box 24/7 but it's
+rarely saturated, and a half-idle instance doubles the effective token price.
+
 ---
 
 ## Design decisions
@@ -222,10 +237,10 @@ dependency is `gopkg.in/yaml.v3`):
 | Hito 2 | scenario runner + per-scenario aggregation |
 | Hito 3 | projection engine with bootstrap confidence intervals |
 | Hito 4 | budget gate + Markdown/JSON report + CI exit codes |
-| Hito 5 | record-once/replay cassette (`--record`/`--replay`) + what-if knobs (`--retry-rate`/`--fanout`/`--context-growth`) |
+| Hito 5 | record-once/replay cassette (`--record`/`--replay`), what-if knobs (`--retry-rate`/`--fanout`/`--context-growth`), self-hosted TCO mode (`augur tco`, `--tco`) |
 
 **Roadmap (stretch, each independently shippable):** GitHub Action wrapper •
-self-hosted TCO mode • a Python output-length prediction sidecar.
+a Python output-length prediction sidecar.
 
 See [`SPEC.md`](SPEC.md) for the full design.
 

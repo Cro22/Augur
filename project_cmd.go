@@ -7,7 +7,6 @@ import (
 	"os"
 
 	"augur/aggregate"
-	"augur/cost"
 	"augur/project"
 	"augur/trace"
 )
@@ -19,6 +18,7 @@ func runProject(args []string) error {
 	fs := flag.NewFlagSet("project", flag.ContinueOnError)
 	tracePath := fs.String("trace", "trace.jsonl", "path to the cost trace (JSONL)")
 	pricingPath := fs.String("pricing", "pricing.yaml", "path to the pricing snapshot")
+	tcoPath := fs.String("tco", "", "derive pricing from a self-hosted TCO config instead of -pricing")
 	trafficPath := fs.String("traffic", "traffic.yaml", "path to the traffic profile")
 	asJSON := fs.Bool("json", false, "emit the projection as JSON instead of a table")
 	ciLevel := fs.Float64("ci", 0.95, "confidence level for bootstrap intervals (0..1)")
@@ -40,7 +40,7 @@ func runProject(args []string) error {
 		return err
 	}
 
-	pricing, err := cost.LoadPricing(*pricingPath)
+	pricing, err := resolvePricing(*pricingPath, *tcoPath)
 	if err != nil {
 		return err
 	}
