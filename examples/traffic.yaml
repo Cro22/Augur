@@ -1,0 +1,25 @@
+# Augur — example traffic profile (used by `augur project`)
+#
+# Production assumptions the observed cost distribution is projected against.
+# The projection is only as honest as these numbers — they are YOUR forecast,
+# not measured by Augur.
+
+version: 1
+
+# Projected population.
+users: 10000
+requests_per_user_per_day: 5
+
+# For per-tenant economics.
+tenants: 50
+
+# Billing horizon.
+days_per_month: 30
+
+# What a production "request" looks like as a mix of scenarios (the id must
+# match a scenario in scenarios.yaml / the trace). Weights need not sum to 1 —
+# they are normalized. Omit this block to weight every observed scenario equally.
+scenario_mix:
+  order-return: 0.3
+  product-question: 0.5
+  multi-step-troubleshoot: 0.2

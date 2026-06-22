@@ -1,0 +1,35 @@
+# Augur — example scenarios file (used by `augur run`)
+#
+# `augur run` executes `command` once per scenario, `runs` times each, through
+# the recording proxy it starts in-process. For every invocation it injects:
+#
+#   AUGUR_SCENARIO_ID   the scenario id below
+#   AUGUR_RUN_ID        a unique id for this repetition
+#   AUGUR_INPUT         the scenario's `input` string
+#   AUGUR_BASE_URL      the proxy URL the agent must call
+#
+# The agent's side of the contract (usually one line of OpenAI-client config):
+#   1. set base_url to AUGUR_BASE_URL
+#   2. send the headers  X-Augur-Scenario-Id: $AUGUR_SCENARIO_ID
+#                        X-Augur-Run-Id:      $AUGUR_RUN_ID
+#   3. use AUGUR_INPUT as the user message (or take {{input}} from argv)
+#
+# Representativeness matters: the projection is only as good as these inputs.
+
+version: 1
+
+# Repetitions per scenario. Agents are non-deterministic, so we run each
+# scenario many times to capture the cost DISTRIBUTION, not a point estimate.
+runs: 20
+
+# The agent entrypoint, argv-style. {{input}} (if present) is replaced with the
+# scenario input; the input is also always available via $AUGUR_INPUT.
+command: ["python", "examples/agent.py", "--prompt", "{{input}}"]
+
+scenarios:
+  - id: order-return
+    input: "I received order #1234 damaged and want to return it for a refund."
+  - id: product-question
+    input: "Does the X200 headset support Bluetooth 5.3 and multipoint pairing?"
+  - id: multi-step-troubleshoot
+    input: "My device won't connect to wifi. Walk me through fixing it step by step."

@@ -1,0 +1,200 @@
+# Augur
+
+> A cost-first FinOps gate for AI agents. **Know the bill before you ship.**
+
+Augur runs your AI agent against a representative workload *before* production,
+projects its **unit economics at scale** (cost per request / per user / per
+tenant / per month), and **fails the build** if it blows your budget.
+
+The thesis: today you find out an agent is financially unsustainable *after* you
+ship and the bill arrives. Augur catches it in CI.
+
+```
+$ augur gate
+# Augur cost report
+**Verdict: ❌ FAIL** — 1 of 3 budget check(s) over limit
+
+| check          | limit      | projected  | status |
+|----------------|-----------:|-----------:|:------:|
+| $/request p95  | $0.030000  | $0.043125  |   ❌   |
+| $/tenant/month | $500.00    | $360.34    |   ✅   |
+| monthly bill   | $20000.00  | $18016.88  |   ✅   |
+
+$ echo $?
+1   # the build fails
+```
+
+---
+
+## Honest positioning (read this before judging it)
+
+This is **not** a virgin space, and pretending otherwise would be dishonest.
+What already exists:
+
+- **Token calculators** (LiteLLM's calculator, dozens of tiktoken-based ones).
+  You type *average* tokens and volume by hand. Useless for agents — you can't
+  guess an agent's token usage, because one user request fans out into many LLM
+  calls with retries and tool loops.
+- **Eval / CI platforms** (Braintrust, Confident AI, Maxim, Promptfoo, Langfuse,
+  …). They run your agent against a dataset in CI and gate the merge, and
+  several attach token cost per call. **But cost is a second-class citizen** —
+  they are *quality* gates (right tool? hallucination? grounded?) with a cost
+  number bolted on the side.
+- **Predictive research** (e.g. PreflightLLMCost) — narrow, focused on
+  predicting output length. Not a productized gate.
+
+### What makes Augur different (the defensible wedge)
+
+1. **Cost-first, not cost-as-byproduct.** The primary output is unit economics,
+   not a quality score.
+2. **Projects to production scale.** Not "this run cost $0.04" — "at your
+   projected volume this is $X/tenant/month, which breaks your budget."
+3. **Models agentic cost drivers from *real* runs.** It runs the agent N times
+   and captures the cost *distribution* (retries, tool-loop fan-out, variance),
+   not a single naive token estimate.
+4. **Complements eval gates; doesn't replace them.** Quality gate: "is it good?"
+   Augur: "can we afford it?"
+
+**Honest reality check:** as a *business* this gets crushed by any eval
+incumbent adding a cost tab — there's no commercial moat. This is built as a
+**portfolio piece**: a clean, pure-Go systems tool (recording proxy, empirical
+distributions, bootstrap projection, CI gate) that shows real depth.
+
+---
+
+## How it works
+
+```
+scenarios.yaml ─┐
+                ├─► augur run ──drives──► your agent ──LLM calls──► augur proxy ──► provider
+                │                              (sets X-Augur-* headers)  │
+                │                                              writes cost trace
+                │                                                        ▼
+                │                                                  trace.jsonl
+pricing.yaml ───┤                                                        │
+traffic.yaml ───┼────────────────────────────► augur project ◄───────────┘
+budget.yaml  ───┘                                     │  (distributions × traffic)
+                                                       ▼
+                                              augur gate ──► report.md / report.json + exit 0/1
+```
+
+The proxy captures calls at the **HTTP layer** (you point your agent's
+`base_url` at it), so Augur is framework- and language-agnostic and records the
+*real* call graph — retries and fan-out included — without you rewriting the
+agent.
+
+---
+
+## Quickstart
+
+Build:
+
+```sh
+go build -o augur .
+```
+
+### 1. Make your agent honour the contract
+
+`augur run` injects four environment variables per invocation. Your agent's only
+job is to read them — typically one line of OpenAI-client config:
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    base_url=os.environ["AUGUR_BASE_URL"],            # point at the proxy
+    default_headers={
+        "X-Augur-Scenario-Id": os.environ["AUGUR_SCENARIO_ID"],
+        "X-Augur-Run-Id":      os.environ["AUGUR_RUN_ID"],
+    },
+)
+prompt = os.environ["AUGUR_INPUT"]                    # the scenario input
+# ... run your agent as usual ...
+```
+
+### 2. Describe your scenarios, traffic, and budget
+
+See [`examples/`](examples/) for documented templates:
+
+- **`scenarios.yaml`** — representative inputs + the agent command + how many
+  times to run each (the projection is only as good as these inputs).
+- **`traffic.yaml`** — production assumptions (users, requests/user/day, tenants,
+  scenario mix).
+- **`budget.yaml`** — the thresholds that fail the build.
+- **`pricing.yaml`** — a dated price snapshot (ships with the repo).
+
+### 3. Run the pipeline
+
+```sh
+# Drive the agent N times per scenario through the recording proxy.
+augur run --scenarios scenarios.yaml --upstream https://api.openai.com
+
+# Eyeball the observed per-scenario cost distribution.
+augur aggregate --trace trace.jsonl
+
+# Project to production scale with confidence intervals.
+augur project --traffic traffic.yaml
+
+# Gate it: writes report.md / report.json, exits non-zero if over budget.
+augur gate --traffic traffic.yaml --budget budget.yaml
+```
+
+`augur gate` is the one you wire into CI.
+
+---
+
+## Design decisions
+
+- **Gate on p95, not the mean.** The cost surprise lives in the tail — long
+  outputs, retry storms, tool loops. The mean hides exactly the failure mode
+  Augur exists to catch. Conservative by design.
+- **Observation via a proxy, not an SDK wrapper.** Works with any agent that can
+  set a base URL; captures the real call graph.
+- **The trace records tokens, not dollars.** Cost is computed downstream, so the
+  same trace can be re-priced against a different snapshot without re-running the
+  agent.
+- **Pricing is an updatable, dated snapshot.** Provider prices drift constantly;
+  `pricing.yaml` says when it was captured. Do not assume it's current.
+
+## Honest limitations
+
+- **Streaming usage** is captured exactly only when the client sets
+  `stream_options.include_usage` (the provider then emits a usage block). Without
+  it, Augur records a zero-token row rather than tokenizing on the proxy side —
+  proxy-side tokenization is fragile (per-model tokenizers) and `include_usage`
+  is the correct, exact path.
+- **Multipliers.** Augur reports *calls per run* — the multiplier it can observe
+  truthfully. Classifying those calls into retries vs sub-agent fan-out needs
+  labeling the trace does not yet carry.
+- **Running the agent in CI spends real tokens.** Keep the scenario set small and
+  `runs` modest; a record-once/replay mode is on the roadmap.
+
+## Status
+
+**v1 complete** — all milestones implemented and tested (pure Go, only external
+dependency is `gopkg.in/yaml.v3`):
+
+| | |
+|---|---|
+| Hito 0 | single-call cost computation |
+| Hito 1 | OpenAI-compatible recording proxy (streaming + non-streaming) |
+| Hito 2 | scenario runner + per-scenario aggregation |
+| Hito 3 | projection engine with bootstrap confidence intervals |
+| Hito 4 | budget gate + Markdown/JSON report + CI exit codes |
+
+**Roadmap (stretch, each independently shippable):** GitHub Action wrapper •
+what-if multiplier knobs • record-once/replay to cut CI token cost • self-hosted
+TCO mode • a Python output-length prediction sidecar.
+
+See [`SPEC.md`](SPEC.md) for the full design.
+
+## Naming
+
+**Augur** — a seer who reads omens to foretell what's coming; here, an agent's
+production cost before it ships. (There is an unrelated crypto project of the
+same name; this is a personal portfolio repo in a different domain.)
+
+## License
+
+Apache 2.0 — see [`LICENSE`](LICENSE).
