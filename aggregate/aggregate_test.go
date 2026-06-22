@@ -135,6 +135,72 @@ func TestAggregateUnknownModelIsHardError(t *testing.T) {
 	}
 }
 
+func TestAggregateWithKnobs(t *testing.T) {
+	// One run, one call: gpt-4o, 1000 in (200 cached), 500 out.
+	//   prompt = 800@2.50 + 200@1.25 = 0.0020 + 0.00025 = 0.00225
+	//   output = 500@10.00 = 0.0050
+	records := []trace.Record{rec("s", "r", 0, "gpt-4o", 1000, 500, 200)}
+
+	// Identity knobs reproduce the observed cost (0.00725).
+	base, err := AggregateWithKnobs(records, testPricing(), Knobs{})
+	if err != nil {
+		t.Fatalf("Aggregate identity: %v", err)
+	}
+	if !approx(base.Runs[0].CostUSD, 0.00725) {
+		t.Errorf("identity run cost = %v, want 0.00725", base.Runs[0].CostUSD)
+	}
+
+	// Knobs: retry +50%, fanout ×2, context ×3.
+	//   callMult = 1.5 * 2 = 3
+	//   cost' = 3 * (3*0.00225 + 0.0050) = 3 * 0.01175 = 0.03525
+	knobs := Knobs{RetryRate: 0.5, FanoutFactor: 2, ContextGrowth: 3}
+	res, err := AggregateWithKnobs(records, testPricing(), knobs)
+	if err != nil {
+		t.Fatalf("Aggregate with knobs: %v", err)
+	}
+	if !approx(res.Runs[0].CostUSD, 0.03525) {
+		t.Errorf("knob run cost = %v, want 0.03525", res.Runs[0].CostUSD)
+	}
+	// The scenario distribution and per-model totals scale identically.
+	if !approx(res.Scenarios[0].TotalCost, 0.03525) {
+		t.Errorf("scenario total = %v, want 0.03525", res.Scenarios[0].TotalCost)
+	}
+	if !approx(res.Scenarios[0].ByModel[0].CostUSD, 0.03525) {
+		t.Errorf("by-model cost = %v, want 0.03525", res.Scenarios[0].ByModel[0].CostUSD)
+	}
+}
+
+func TestKnobsIdentity(t *testing.T) {
+	cases := []struct {
+		k    Knobs
+		want bool
+	}{
+		{Knobs{}, true},
+		{Knobs{FanoutFactor: 1, ContextGrowth: 1}, true},
+		{Knobs{RetryRate: 0.1}, false},
+		{Knobs{FanoutFactor: 2}, false},
+		{Knobs{ContextGrowth: 1.5}, false},
+	}
+	for _, c := range cases {
+		if got := c.k.IsIdentity(); got != c.want {
+			t.Errorf("%+v IsIdentity = %v, want %v", c.k, got, c.want)
+		}
+	}
+}
+
+// Context growth must inflate ONLY the prompt side, not the completion.
+func TestKnobsContextGrowthPromptOnly(t *testing.T) {
+	// Pure-output call (0 input): context growth must leave it unchanged.
+	outOnly := []trace.Record{rec("s", "r", 0, "gpt-4o", 0, 1000, 0)} // 1000@10 = 0.01
+	res, err := AggregateWithKnobs(outOnly, testPricing(), Knobs{ContextGrowth: 5})
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+	if !approx(res.Runs[0].CostUSD, 0.01) {
+		t.Errorf("output-only cost under context growth = %v, want 0.01 (unchanged)", res.Runs[0].CostUSD)
+	}
+}
+
 func TestAggregateEmpty(t *testing.T) {
 	res, err := Aggregate(nil, testPricing())
 	if err != nil {

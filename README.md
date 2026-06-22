@@ -164,6 +164,24 @@ free. Commit `cassette.jsonl` alongside your scenarios. (A call the agent makes
 that wasn't recorded is a replay miss — reported loudly, so divergence from the
 recording never passes silently.)
 
+### What-if sensitivity analysis
+
+`project` and `gate` take what-if multipliers that re-cost the *recorded* trace
+under hypothetical agentic cost drivers — no agent re-run, no tokens:
+
+```sh
+# "What if retries climb 30%, sub-agent fan-out adds 50% more calls, and
+#  context grows to 2× as conversations lengthen?"
+augur project --retry-rate 0.3 --fanout 1.5 --context-growth 2
+
+# Gate against a pessimistic scenario, not just today's happy path:
+augur gate --context-growth 1.5 --budget budget.yaml
+```
+
+Retries and fan-out scale the whole call (more calls); context growth inflates
+only the prompt side, not the completion — so the model reflects *which* driver
+moved, not a flat fudge factor.
+
 ---
 
 ## Design decisions
@@ -204,11 +222,10 @@ dependency is `gopkg.in/yaml.v3`):
 | Hito 2 | scenario runner + per-scenario aggregation |
 | Hito 3 | projection engine with bootstrap confidence intervals |
 | Hito 4 | budget gate + Markdown/JSON report + CI exit codes |
-| Hito 5 | record-once/replay cassette to cut CI token cost (`--record`/`--replay`) |
+| Hito 5 | record-once/replay cassette (`--record`/`--replay`) + what-if knobs (`--retry-rate`/`--fanout`/`--context-growth`) |
 
 **Roadmap (stretch, each independently shippable):** GitHub Action wrapper •
-what-if multiplier knobs • self-hosted TCO mode • a Python output-length
-prediction sidecar.
+self-hosted TCO mode • a Python output-length prediction sidecar.
 
 See [`SPEC.md`](SPEC.md) for the full design.
 

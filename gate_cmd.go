@@ -28,9 +28,11 @@ func runGate(args []string) error {
 	ciLevel := fs.Float64("ci", 0.95, "confidence level for bootstrap intervals (0..1)")
 	bootstrap := fs.Int("bootstrap", 2000, "number of bootstrap resamples")
 	seed := fs.Uint64("seed", 1, "PRNG seed for reproducible bootstrap intervals")
+	knobFs := addKnobFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	knobs := knobFs.knobs()
 
 	records, err := readTrace(*tracePath)
 	if err != nil {
@@ -49,7 +51,7 @@ func runGate(args []string) error {
 		return err
 	}
 
-	res, err := aggregate.Aggregate(records, pricing)
+	res, err := aggregate.AggregateWithKnobs(records, pricing, knobs)
 	if err != nil {
 		return err
 	}
@@ -59,6 +61,7 @@ func runGate(args []string) error {
 	if err != nil {
 		return err
 	}
+	proj.WhatIf = describeKnobs(knobs)
 
 	report := gate.NewReport(proj, gate.Evaluate(proj, budget))
 

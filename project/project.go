@@ -51,6 +51,11 @@ type Projection struct {
 	// ByModel decomposes the average request's cost by model, sorted by cost.
 	ByModel []ModelShare `json:"by_model"`
 
+	// WhatIf, when non-empty, describes the what-if knobs applied to the
+	// underlying aggregation (set by the caller). Empty means the projection is
+	// of the observed cost as-is.
+	WhatIf string `json:"what_if,omitempty"`
+
 	Traffic Traffic `json:"-"`
 }
 
