@@ -5,8 +5,9 @@
 //	augur proxy — OpenAI-compatible recording proxy (Hito 1)
 //	augur run — drive the agent against scenarios.yaml ×N through the proxy (Hito 2)
 //	augur aggregate — trace + pricing → per-scenario cost distribution (Hito 2)
+//	augur project — aggregate + traffic → projected unit economics with CIs (Hito 3)
 //
-// Still to come: project (Hito 3), gate (Hito 4).
+// Still to come: gate (Hito 4).
 package main
 
 import (
@@ -16,55 +17,59 @@ import (
 	"os"
 )
 
+// command is one augur subcommand: a run function plus the one-line summary
+// shown in usage.
+type command struct {
+	run     func(args []string) error
+	summary string
+}
+
+// commands is the subcommand dispatch table. Adding a hito's command is one
+// entry here plus its run<Name> function in its own file.
+var commands = map[string]command{
+	"proxy":     {runProxy, "run the OpenAI-compatible recording proxy"},
+	"run":       {runRun, "drive the agent against scenarios.yaml ×N through the proxy"},
+	"aggregate": {runAggregate, "summarize a cost trace into per-scenario distributions"},
+	"project":   {runProject, "project a trace to production unit economics with CIs"},
+}
+
+// order fixes the usage listing (maps don't iterate deterministically).
+var order = []string{"proxy", "run", "aggregate", "project"}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
 	}
 
-	cmd, args := os.Args[1], os.Args[2:]
-	switch cmd {
-	case "proxy":
-		if err := runProxy(args); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				return // flag already printed usage
-			}
-			fmt.Fprintln(os.Stderr, "augur proxy:", err)
-			os.Exit(1)
-		}
-	case "run":
-		if err := runRun(args); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				return
-			}
-			fmt.Fprintln(os.Stderr, "augur run:", err)
-			os.Exit(1)
-		}
-	case "aggregate":
-		if err := runAggregate(args); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				return
-			}
-			fmt.Fprintln(os.Stderr, "augur aggregate:", err)
-			os.Exit(1)
-		}
+	name, args := os.Args[1], os.Args[2:]
+	switch name {
 	case "-h", "--help", "help":
 		usage()
-	default:
-		fmt.Fprintf(os.Stderr, "augur: unknown command %q\n\n", cmd)
+		return
+	}
+
+	cmd, ok := commands[name]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "augur: unknown command %q\n\n", name)
 		usage()
 		os.Exit(2)
+	}
+
+	if err := cmd.run(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return // flag already printed usage to stderr
+		}
+		fmt.Fprintf(os.Stderr, "augur %s: %v\n", name, err)
+		os.Exit(1)
 	}
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `augur — cost-first FinOps gate for AI agents
-
-usage:
-  augur proxy [flags]       run the OpenAI-compatible recording proxy
-  augur run [flags]         drive the agent against scenarios.yaml ×N through the proxy
-  augur aggregate [flags]   summarize a cost trace into per-scenario distributions
-
-run "augur <command> -h" for command flags.
-`)
+	fmt.Fprintln(os.Stderr, "augur — cost-first FinOps gate for AI agents")
+	fmt.Fprintln(os.Stderr, "\nusage:")
+	for _, name := range order {
+		fmt.Fprintf(os.Stderr, "  augur %-11s %s\n", name, commands[name].summary)
+	}
+	fmt.Fprintln(os.Stderr, "\nrun \"augur <command> -h\" for command flags.")
 }
