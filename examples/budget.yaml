@@ -1,0 +1,19 @@
+# Augur — example budget (used by `augur gate`)
+#
+# Thresholds the projected unit economics must stay within, or the build fails
+# (augur gate exits non-zero). Every threshold is optional: set only the
+# dimensions you want to gate on. A budget with no thresholds is rejected.
+#
+# The per-request check uses the p95, not the mean (SPEC D2): the cost surprise
+# lives in the tail, so gating on the average would hide the failure mode.
+
+version: 1
+
+# Cap the p95 cost of a single request.
+max_request_p95_usd: 0.05
+
+# Cap the projected cost per tenant per month.
+max_tenant_per_month_usd: 500
+
+# Cap the projected total monthly bill.
+max_monthly_bill_usd: 20000

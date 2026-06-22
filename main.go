@@ -24,6 +24,14 @@ type command struct {
 	summary string
 }
 
+// exitErr lets a subcommand request a specific process exit code without main
+// printing an "augur <cmd>:" error line. The gate uses it to fail the build
+// after it has already written its report — a budget overrun is a normal,
+// expected outcome, not an internal error.
+type exitErr struct{ code int }
+
+func (e *exitErr) Error() string { return fmt.Sprintf("exit status %d", e.code) }
+
 // commands is the subcommand dispatch table. Adding a hito's command is one
 // entry here plus its run<Name> function in its own file.
 var commands = map[string]command{
@@ -31,10 +39,11 @@ var commands = map[string]command{
 	"run":       {runRun, "drive the agent against scenarios.yaml ×N through the proxy"},
 	"aggregate": {runAggregate, "summarize a cost trace into per-scenario distributions"},
 	"project":   {runProject, "project a trace to production unit economics with CIs"},
+	"gate":      {runGate, "check a projection against budget.yaml (exit 1 if over)"},
 }
 
 // order fixes the usage listing (maps don't iterate deterministically).
-var order = []string{"proxy", "run", "aggregate", "project"}
+var order = []string{"proxy", "run", "aggregate", "project", "gate"}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -59,6 +68,10 @@ func main() {
 	if err := cmd.run(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return // flag already printed usage to stderr
+		}
+		var ee *exitErr
+		if errors.As(err, &ee) {
+			os.Exit(ee.code) // command already reported; just set the code
 		}
 		fmt.Fprintf(os.Stderr, "augur %s: %v\n", name, err)
 		os.Exit(1)
