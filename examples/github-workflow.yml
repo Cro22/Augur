@@ -1,0 +1,35 @@
+# Example: gate an AI agent's projected cost on every pull request.
+#
+# Copy this into your repo as .github/workflows/cost-gate.yml and adjust the
+# paths. The lightest setup commits a recorded cassette (or a trace) so CI spends
+# no tokens: Augur replays it, projects the cost, and fails the PR if it's over
+# budget — posting the report as a comment.
+
+name: Cost gate
+
+on: pull_request
+
+jobs:
+  augur:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # needed to post the report comment
+    steps:
+      - uses: actions/checkout@v4
+
+      # Replace with the published action ref, e.g.:
+      #   uses: your-org/augur@v1
+      # (Within the Augur repo itself, `uses: ./` runs the local action.)
+      - uses: your-org/augur@v1
+        with:
+          # Replay a committed cassette so CI spends no tokens. Drop `cassette`
+          # and point `trace` at a committed trace.jsonl if you don't run the
+          # agent in CI.
+          cassette: cassette.jsonl
+          scenarios: scenarios.yaml
+          pricing: pricing.yaml
+          traffic: traffic.yaml
+          budget: budget.yaml
+          # Optional: gate against a pessimistic scenario.
+          # extra-args: "--context-growth 1.5 --retry-rate 0.2"

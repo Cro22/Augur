@@ -197,6 +197,35 @@ augur gate --tco tco.yaml ...     # cost the trace against self-hosted pricing
 `--pricing`. Utilization is the honest part: you pay for the box 24/7 but it's
 rarely saturated, and a half-idle instance doubles the effective token price.
 
+### GitHub Action
+
+Augur ships as a composite action that runs the gate on a pull request, posts
+the report as a comment, and fails the check if the projection is over budget.
+Combined with a committed cassette, the PR check spends no tokens:
+
+```yaml
+# .github/workflows/cost-gate.yml
+name: Cost gate
+on: pull_request
+jobs:
+  augur:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # to post the report comment
+    steps:
+      - uses: actions/checkout@v4
+      - uses: your-org/augur@v1
+        with:
+          cassette: cassette.jsonl   # replay → zero tokens
+          traffic: traffic.yaml
+          budget: budget.yaml
+```
+
+See [`action.yml`](action.yml) for all inputs and
+[`examples/github-workflow.yml`](examples/github-workflow.yml) for a fuller
+example.
+
 ---
 
 ## Design decisions
@@ -237,10 +266,10 @@ dependency is `gopkg.in/yaml.v3`):
 | Hito 2 | scenario runner + per-scenario aggregation |
 | Hito 3 | projection engine with bootstrap confidence intervals |
 | Hito 4 | budget gate + Markdown/JSON report + CI exit codes |
-| Hito 5 | record-once/replay cassette (`--record`/`--replay`), what-if knobs (`--retry-rate`/`--fanout`/`--context-growth`), self-hosted TCO mode (`augur tco`, `--tco`) |
+| Hito 5 | record/replay cassette (`--record`/`--replay`), what-if knobs (`--retry-rate`/`--fanout`/`--context-growth`), self-hosted TCO mode (`augur tco`, `--tco`), GitHub Action (`action.yml`) |
 
-**Roadmap (stretch, each independently shippable):** GitHub Action wrapper •
-a Python output-length prediction sidecar.
+**Roadmap (stretch):** a Python output-length prediction sidecar (the analytical
+piece that would earn a second language).
 
 See [`SPEC.md`](SPEC.md) for the full design.
 
