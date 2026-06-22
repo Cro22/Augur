@@ -27,3 +27,11 @@ go.work.sum
 
 #IDE
 .idea
+
+# Augur build + generated artifacts (keep the repo clean of local runs)
+/augur
+/augur-report.md
+/augur-report.json
+/trace.jsonl
+/report.md
+/report.json

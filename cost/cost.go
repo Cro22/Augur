@@ -67,18 +67,48 @@ func (u Usage) Validate() error {
 	return nil
 }
 
-// Cost returns the USD cost of a single call priced at p. The cached portion of
-// the prompt is billed at CachedInput, the remainder at Input, and completion
-// tokens at Output. It returns an error if the usage is invalid (see Validate).
-func (p ModelPrice) Cost(u Usage) (float64, error) {
+// Breakdown is a single call's cost split into its three components. It exists
+// so callers (the what-if knobs) can scale the prompt side independently of the
+// completion side — context growth inflates input, not output.
+type Breakdown struct {
+	// InputUSD is the cost of the non-cached prompt tokens.
+	InputUSD float64
+	// CachedUSD is the cost of the cached prompt tokens.
+	CachedUSD float64
+	// OutputUSD is the cost of the completion tokens.
+	OutputUSD float64
+}
+
+// Total is the full call cost: the three components summed.
+func (b Breakdown) Total() float64 { return b.InputUSD + b.CachedUSD + b.OutputUSD }
+
+// PromptUSD is the cost attributable to the prompt (input + cached) — the part
+// that scales with context growth.
+func (b Breakdown) PromptUSD() float64 { return b.InputUSD + b.CachedUSD }
+
+// Breakdown returns the per-component cost of a single call priced at p. The
+// cached portion of the prompt is billed at CachedInput, the remainder at
+// Input, and completion tokens at Output. It errors if the usage is invalid.
+func (p ModelPrice) Breakdown(u Usage) (Breakdown, error) {
 	if err := u.Validate(); err != nil {
-		return 0, err
+		return Breakdown{}, err
 	}
 	fullInput := u.InputTokens - u.CachedTokens
-	dollars := float64(fullInput)/tokensPerMtok*p.Input +
-		float64(u.CachedTokens)/tokensPerMtok*p.CachedInput +
-		float64(u.OutputTokens)/tokensPerMtok*p.Output
-	return dollars, nil
+	return Breakdown{
+		InputUSD:  float64(fullInput) / tokensPerMtok * p.Input,
+		CachedUSD: float64(u.CachedTokens) / tokensPerMtok * p.CachedInput,
+		OutputUSD: float64(u.OutputTokens) / tokensPerMtok * p.Output,
+	}, nil
+}
+
+// Cost returns the USD cost of a single call priced at p. It returns an error if
+// the usage is invalid (see Validate).
+func (p ModelPrice) Cost(u Usage) (float64, error) {
+	b, err := p.Breakdown(u)
+	if err != nil {
+		return 0, err
+	}
+	return b.Total(), nil
 }
 
 // Pricing is a loaded pricing snapshot: a set of per-model prices plus the date
@@ -103,4 +133,14 @@ func (p Pricing) Cost(model string, u Usage) (float64, error) {
 		return 0, fmt.Errorf("%w: %q", ErrUnknownModel, model)
 	}
 	return mp.Cost(u)
+}
+
+// Breakdown computes the per-component cost of a single call for the named
+// model, wrapping ErrUnknownModel when the model is absent.
+func (p Pricing) Breakdown(model string, u Usage) (Breakdown, error) {
+	mp, ok := p.Models[model]
+	if !ok {
+		return Breakdown{}, fmt.Errorf("%w: %q", ErrUnknownModel, model)
+	}
+	return mp.Breakdown(u)
 }

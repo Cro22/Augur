@@ -16,7 +16,11 @@ func (p Projection) WriteTable(w io.Writer) error {
 	}
 	fmt.Fprintf(w, "traffic: %d users x %g req/user/day, %d tenants, %d days/month\n",
 		tr.Users, tr.RequestsPerUserPerDay, tr.Tenants, tr.DaysPerMonth)
-	fmt.Fprintf(w, "bootstrap: %d samples, %.0f%% CI, seed %d\n\n", p.BootstrapSamples, p.CILevel*100, p.Seed)
+	fmt.Fprintf(w, "bootstrap: %d samples, %.0f%% CI, seed %d\n", p.BootstrapSamples, p.CILevel*100, p.Seed)
+	if p.WhatIf != "" {
+		fmt.Fprintf(w, "%s\n", p.WhatIf)
+	}
+	fmt.Fprintln(w)
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(tw, "  metric\tvalue\t%.0f%% CI\n", p.CILevel*100)

@@ -80,6 +80,32 @@ func TestModelPriceCost(t *testing.T) {
 	}
 }
 
+func TestBreakdown(t *testing.T) {
+	// 1000 input (200 cached), 500 output on gpt-4o:
+	//   full input 800 @2.50 = 0.0020 ; cached 200 @1.25 = 0.00025 ; out 500 @10 = 0.0050
+	b, err := gpt4o.Breakdown(Usage{InputTokens: 1000, OutputTokens: 500, CachedTokens: 200})
+	if err != nil {
+		t.Fatalf("Breakdown: %v", err)
+	}
+	if !approxEqual(b.InputUSD, 0.0020) {
+		t.Errorf("InputUSD = %v, want 0.0020", b.InputUSD)
+	}
+	if !approxEqual(b.CachedUSD, 0.00025) {
+		t.Errorf("CachedUSD = %v, want 0.00025", b.CachedUSD)
+	}
+	if !approxEqual(b.OutputUSD, 0.0050) {
+		t.Errorf("OutputUSD = %v, want 0.0050", b.OutputUSD)
+	}
+	if !approxEqual(b.PromptUSD(), 0.00225) {
+		t.Errorf("PromptUSD = %v, want 0.00225", b.PromptUSD())
+	}
+	// Total must equal Cost for the same usage.
+	c, _ := gpt4o.Cost(Usage{InputTokens: 1000, OutputTokens: 500, CachedTokens: 200})
+	if !approxEqual(b.Total(), c) {
+		t.Errorf("Total %v != Cost %v", b.Total(), c)
+	}
+}
+
 func TestCostInvalidUsage(t *testing.T) {
 	tests := []struct {
 		name  string

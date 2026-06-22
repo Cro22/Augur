@@ -1,0 +1,26 @@
+# Augur — example TCO config (used by `augur tco`, and by project/gate via -tco)
+#
+# For self-hosted models there is no per-token API price; you pay for an
+# instance by the hour and get some serving throughput. Augur derives the
+# effective $/Mtok:
+#
+#   $/Mtok = instance_cost_per_hour x 1e6 / (tokens_per_sec x 3600 x utilization)
+#
+# The deployment name must match the model id your agent sends, so the derived
+# price lines up with the trace. A self-hosted price is token-type-agnostic:
+# input, output, and cached tokens all carry the effective rate.
+
+version: 1
+
+deployments:
+  # e.g. Llama-3.1-70B on an 8xH100 node.
+  llama-3.1-70b:
+    instance_cost_per_hour: 32.77   # on-demand 8xH100 instance
+    tokens_per_sec: 2500            # measured aggregate serving throughput
+    utilization: 0.6                # you pay 24/7 but the box isn't always busy
+
+  # e.g. Mixtral-8x7B on a single A100.
+  mixtral-8x7b:
+    instance_cost_per_hour: 3.67
+    tokens_per_sec: 1800
+    # utilization omitted -> defaults to 1.0 (always busy)

@@ -46,7 +46,11 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	bw.printf("- Pricing snapshot: `%s`\n", p.SnapshotDate)
 	bw.printf("- Traffic: %d users × %g req/user/day, %d tenants, %d days/month\n",
 		tr.Users, tr.RequestsPerUserPerDay, tr.Tenants, tr.DaysPerMonth)
-	bw.printf("- Bootstrap: %d samples, %.0f%% CI, seed %d\n\n", p.BootstrapSamples, p.CILevel*100, p.Seed)
+	bw.printf("- Bootstrap: %d samples, %.0f%% CI, seed %d\n", p.BootstrapSamples, p.CILevel*100, p.Seed)
+	if p.WhatIf != "" {
+		bw.printf("- **What-if:** %s\n", p.WhatIf)
+	}
+	bw.printf("\n")
 
 	bw.printf("## Budget checks\n\n")
 	bw.printf("| check | limit | projected | status |\n")

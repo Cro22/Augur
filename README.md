@@ -142,6 +142,90 @@ augur gate --traffic traffic.yaml --budget budget.yaml
 
 `augur gate` is the one you wire into CI.
 
+### Record once, replay for free
+
+Running the agent against the real provider on every CI push spends real tokens.
+Record the responses once, then replay them — `augur run --replay` re-executes
+the agent against the recorded responses and regenerates the trace **without
+contacting the provider**:
+
+```sh
+# Once (locally or nightly), against the real provider:
+augur run --scenarios scenarios.yaml --record cassette.jsonl
+
+# In CI, on every push — zero tokens spent:
+augur run --scenarios scenarios.yaml --replay cassette.jsonl --trace trace.jsonl
+augur gate --traffic traffic.yaml --budget budget.yaml
+```
+
+Because replay re-runs the *agent* (not just the trace), a cost regression from
+an agent code change still surfaces — exercised against the old responses, for
+free. Commit `cassette.jsonl` alongside your scenarios. (A call the agent makes
+that wasn't recorded is a replay miss — reported loudly, so divergence from the
+recording never passes silently.)
+
+### What-if sensitivity analysis
+
+`project` and `gate` take what-if multipliers that re-cost the *recorded* trace
+under hypothetical agentic cost drivers — no agent re-run, no tokens:
+
+```sh
+# "What if retries climb 30%, sub-agent fan-out adds 50% more calls, and
+#  context grows to 2× as conversations lengthen?"
+augur project --retry-rate 0.3 --fanout 1.5 --context-growth 2
+
+# Gate against a pessimistic scenario, not just today's happy path:
+augur gate --context-growth 1.5 --budget budget.yaml
+```
+
+Retries and fan-out scale the whole call (more calls); context growth inflates
+only the prompt side, not the completion — so the model reflects *which* driver
+moved, not a flat fudge factor.
+
+### Self-hosted models (TCO)
+
+For a model you run yourself there's no per-token API price — you pay for an
+instance by the hour. Describe the deployment in `tco.yaml` (instance $/hr,
+serving throughput, utilization) and Augur derives the effective $/Mtok:
+
+```sh
+augur tco --tco tco.yaml          # show the derived effective $/Mtok
+augur gate --tco tco.yaml ...     # cost the trace against self-hosted pricing
+```
+
+`--tco` is accepted by `aggregate`, `project`, and `gate` as an alternative to
+`--pricing`. Utilization is the honest part: you pay for the box 24/7 but it's
+rarely saturated, and a half-idle instance doubles the effective token price.
+
+### GitHub Action
+
+Augur ships as a composite action that runs the gate on a pull request, posts
+the report as a comment, and fails the check if the projection is over budget.
+Combined with a committed cassette, the PR check spends no tokens:
+
+```yaml
+# .github/workflows/cost-gate.yml
+name: Cost gate
+on: pull_request
+jobs:
+  augur:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # to post the report comment
+    steps:
+      - uses: actions/checkout@v4
+      - uses: your-org/augur@v1
+        with:
+          cassette: cassette.jsonl   # replay → zero tokens
+          traffic: traffic.yaml
+          budget: budget.yaml
+```
+
+See [`action.yml`](action.yml) for all inputs and
+[`examples/github-workflow.yml`](examples/github-workflow.yml) for a fuller
+example.
+
 ---
 
 ## Design decisions
@@ -182,10 +266,10 @@ dependency is `gopkg.in/yaml.v3`):
 | Hito 2 | scenario runner + per-scenario aggregation |
 | Hito 3 | projection engine with bootstrap confidence intervals |
 | Hito 4 | budget gate + Markdown/JSON report + CI exit codes |
+| Hito 5 | record/replay cassette (`--record`/`--replay`), what-if knobs (`--retry-rate`/`--fanout`/`--context-growth`), self-hosted TCO mode (`augur tco`, `--tco`), GitHub Action (`action.yml`) |
 
-**Roadmap (stretch, each independently shippable):** GitHub Action wrapper •
-what-if multiplier knobs • record-once/replay to cut CI token cost • self-hosted
-TCO mode • a Python output-length prediction sidecar.
+**Roadmap (stretch):** a Python output-length prediction sidecar (the analytical
+piece that would earn a second language).
 
 See [`SPEC.md`](SPEC.md) for the full design.
 

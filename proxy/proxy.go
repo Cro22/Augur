@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"augur/cassette"
 	"augur/trace"
 )
 
@@ -39,6 +40,18 @@ const (
 // time.Now) so tests can stamp deterministic timestamps.
 type nowFunc func() time.Time
 
+// Mode selects how the proxy obtains responses.
+type Mode int
+
+const (
+	// ModeLive forwards to the real provider (the default).
+	ModeLive Mode = iota
+	// ModeRecord forwards to the provider AND saves each response to a cassette.
+	ModeRecord
+	// ModeReplay serves responses from a cassette without calling the provider.
+	ModeReplay
+)
+
 // Server is the recording proxy. Construct it with New and mount it with
 // http.ListenAndServe; it implements http.Handler.
 type Server struct {
@@ -47,12 +60,16 @@ type Server struct {
 	client   *http.Client
 	now      nowFunc
 
+	mode     Mode
+	cassette *cassette.Cassette
+
 	mu  sync.Mutex
 	seq map[string]int // per (scenario|run) next call ordinal
 }
 
 // New returns a Server that forwards to upstream (e.g. https://api.openai.com)
-// and appends trace rows via tracer. A nil client uses a sensible default.
+// and appends trace rows via tracer. A nil client uses a sensible default. The
+// server starts in ModeLive; call Record or Replay to change mode.
 func New(upstream *url.URL, tracer *trace.Writer, client *http.Client) *Server {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Minute}
@@ -64,6 +81,21 @@ func New(upstream *url.URL, tracer *trace.Writer, client *http.Client) *Server {
 		now:      time.Now,
 		seq:      make(map[string]int),
 	}
+}
+
+// Record switches the server to ModeRecord: responses are still fetched from
+// the provider and relayed, but each is also saved to c.
+func (s *Server) Record(c *cassette.Cassette) {
+	s.mode = ModeRecord
+	s.cassette = c
+}
+
+// Replay switches the server to ModeReplay: responses are served from c and the
+// provider is never contacted (no tokens spent). The cost trace is regenerated
+// from the recorded responses.
+func (s *Server) Replay(c *cassette.Cassette) {
+	s.mode = ModeReplay
+	s.cassette = c
 }
 
 // nextSeq returns and increments the call ordinal for a (scenario, run) pair.
@@ -91,6 +123,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = r.Body.Close()
 	reqModel := modelFromRequest(reqBody)
 
+	// Assign the call's ordinal once, up front: it is both the trace's seq and
+	// the cassette key, so record and replay must compute it identically.
+	seq := s.nextSeq(scenario, run)
+
+	if s.mode == ModeReplay {
+		s.replay(w, scenario, run, seq, reqModel, r.URL.Path)
+		return
+	}
+
 	outReq, err := s.buildUpstreamRequest(r, reqBody)
 	if err != nil {
 		http.Error(w, "augur proxy: building upstream request: "+err.Error(), http.StatusBadGateway)
@@ -105,64 +146,92 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Dispatch on the response shape. A streamed (SSE) body must be relayed
-	// chunk-by-chunk so the agent sees tokens in real time; a regular JSON body
-	// is read in full. Both extract usage the same way, so totals reconcile.
-	var (
-		usage     oaiUsage
-		respModel string
-		ok        bool
-	)
-	if isEventStream(resp.Header) {
-		usage, respModel = s.streamResponse(w, resp)
-	} else if usage, respModel, ok = s.bufferResponse(w, resp); !ok {
-		return // bufferResponse already wrote an error to the client
+	// Live mode streams an SSE body back chunk-by-chunk so the agent sees tokens
+	// in real time. Record mode (and every non-streaming response) goes through
+	// the buffered path so the full body can be captured for the cassette.
+	if s.mode == ModeLive && isEventStream(resp.Header) {
+		usage, respModel := s.streamResponse(w, resp)
+		latency := s.now().Sub(start)
+		s.recordTrace(start, scenario, run, seq, pickModel(reqModel, respModel), usage, latency.Milliseconds(), r.URL.Path, resp.StatusCode)
+		return
 	}
-	latency := s.now().Sub(start)
 
-	// Record the call. Parse failures (a non-JSON body, an error response with
-	// no usage) yield zero tokens but the row is still written — a burned-but-
-	// failed call is precisely the surprise the trace exists to surface.
-	model := reqModel
-	if model == "" {
-		model = respModel
-	}
-	rec := trace.Record{
-		Timestamp:    start.UTC().Format(time.RFC3339Nano),
-		ScenarioID:   scenario,
-		RunID:        run,
-		Seq:          s.nextSeq(scenario, run),
-		Model:        model,
-		InputTokens:  usage.InputTokens,
-		OutputTokens: usage.OutputTokens,
-		CachedTokens: usage.CachedTokens,
-		LatencyMs:    latency.Milliseconds(),
-		Endpoint:     r.URL.Path,
-		Status:       resp.StatusCode,
-	}
-	if err := s.tracer.Write(rec); err != nil {
-		// A trace write failure must not corrupt the agent's response, but it
-		// must be loud: a silently dropped row means an under-counted bill.
-		fmt.Printf("augur proxy: WARNING trace write failed: %v\n", err)
-	}
-}
-
-// bufferResponse relays a non-streaming response: it reads the whole body,
-// copies headers/status, writes the body through unchanged, and parses usage.
-// It returns ok=false (after writing a 502) only if the upstream body cannot be
-// read — in which case the caller must not record a row.
-func (s *Server) bufferResponse(w http.ResponseWriter, resp *http.Response) (oaiUsage, string, bool) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		http.Error(w, "augur proxy: reading upstream response: "+err.Error(), http.StatusBadGateway)
-		return oaiUsage{}, "", false
+		return
 	}
+	latency := s.now().Sub(start)
+	contentType := resp.Header.Get("Content-Type")
+
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 
-	usage, _, model := parseUsageJSON(body)
-	return usage, model, true
+	if s.mode == ModeRecord && s.cassette != nil {
+		if err := s.cassette.Record(cassette.Entry{
+			ScenarioID: scenario, RunID: run, Seq: seq,
+			Status: resp.StatusCode, ContentType: contentType,
+			LatencyMs: latency.Milliseconds(), Body: string(body),
+		}); err != nil {
+			fmt.Printf("augur proxy: WARNING cassette write failed: %v\n", err)
+		}
+	}
+
+	usage, respModel := extractUsage(contentType, body)
+	s.recordTrace(start, scenario, run, seq, pickModel(reqModel, respModel), usage, latency.Milliseconds(), r.URL.Path, resp.StatusCode)
+}
+
+// replay serves a previously recorded response from the cassette without
+// contacting the provider, and regenerates the call's trace row from it. A miss
+// means the agent made a call that was not recorded — surfaced as a 502 so the
+// divergence is loud rather than silently mis-costed.
+func (s *Server) replay(w http.ResponseWriter, scenario, run string, seq int, reqModel, path string) {
+	e, ok := s.cassette.Lookup(scenario, run, seq)
+	if !ok {
+		http.Error(w, fmt.Sprintf("augur proxy: replay miss for scenario %q run %q seq %d (agent diverged from the recording?)",
+			scenario, run, seq), http.StatusBadGateway)
+		return
+	}
+	body := []byte(e.Body)
+	if e.ContentType != "" {
+		w.Header().Set("Content-Type", e.ContentType)
+	}
+	w.WriteHeader(e.Status)
+	_, _ = w.Write(body)
+
+	usage, respModel := extractUsage(e.ContentType, body)
+	s.recordTrace(s.now(), scenario, run, seq, pickModel(reqModel, respModel), usage, e.LatencyMs, path, e.Status)
+}
+
+// recordTrace writes one trace row. A write failure must not corrupt the
+// agent's response but must be loud: a dropped row means an under-counted bill.
+func (s *Server) recordTrace(ts time.Time, scenario, run string, seq int, model string, u oaiUsage, latencyMs int64, path string, status int) {
+	rec := trace.Record{
+		Timestamp:    ts.UTC().Format(time.RFC3339Nano),
+		ScenarioID:   scenario,
+		RunID:        run,
+		Seq:          seq,
+		Model:        model,
+		InputTokens:  u.InputTokens,
+		OutputTokens: u.OutputTokens,
+		CachedTokens: u.CachedTokens,
+		LatencyMs:    latencyMs,
+		Endpoint:     path,
+		Status:       status,
+	}
+	if err := s.tracer.Write(rec); err != nil {
+		fmt.Printf("augur proxy: WARNING trace write failed: %v\n", err)
+	}
+}
+
+// pickModel prefers the request's model (it matches pricing.yaml keys) and falls
+// back to the model echoed in the response.
+func pickModel(reqModel, respModel string) string {
+	if reqModel != "" {
+		return reqModel
+	}
+	return respModel
 }
 
 // buildUpstreamRequest clones the inbound request onto the upstream base URL,

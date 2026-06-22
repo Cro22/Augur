@@ -61,6 +61,50 @@ type Result struct {
 	Runs []Run `json:"runs"`
 }
 
+// Knobs are what-if multipliers applied to every call's cost, for sensitivity
+// analysis that reuses an existing trace instead of re-running the agent. The
+// zero value is the identity (the observed cost). They model the agentic cost
+// drivers:
+//
+//	RetryRate     extra fraction of calls retried (0.2 = 20% more calls)
+//	FanoutFactor  multiplier on call count from sub-agent/tool fan-out
+//	ContextGrowth multiplier on prompt (input + cached) cost from history growth
+//
+// Retries and fan-out add whole calls, so they scale the entire call cost;
+// context growth inflates the prompt only, not the completion. Per call:
+//
+//	cost' = (1 + RetryRate) * FanoutFactor * (ContextGrowth*prompt + output)
+type Knobs struct {
+	RetryRate     float64
+	FanoutFactor  float64
+	ContextGrowth float64
+}
+
+// normalized fills in identity defaults: FanoutFactor and ContextGrowth default
+// to 1 (no change) when left at zero, RetryRate stays 0.
+func (k Knobs) normalized() Knobs {
+	if k.FanoutFactor == 0 {
+		k.FanoutFactor = 1
+	}
+	if k.ContextGrowth == 0 {
+		k.ContextGrowth = 1
+	}
+	return k
+}
+
+// IsIdentity reports whether the knobs leave cost unchanged.
+func (k Knobs) IsIdentity() bool {
+	n := k.normalized()
+	return n.RetryRate == 0 && n.FanoutFactor == 1 && n.ContextGrowth == 1
+}
+
+// apply returns the what-if cost of a single call given its component breakdown.
+func (k Knobs) apply(b cost.Breakdown) float64 {
+	n := k.normalized()
+	callMult := (1 + n.RetryRate) * n.FanoutFactor
+	return callMult * (n.ContextGrowth*b.PromptUSD() + b.OutputUSD)
+}
+
 // Aggregate prices every record against pricing and builds per-scenario cost
 // distributions. An un-priceable model is a hard error (wrapping
 // cost.ErrUnknownModel): an un-priced call means an unknowable bill, the exact
@@ -68,6 +112,12 @@ type Result struct {
 //
 // An empty trace yields a zero Result and no error.
 func Aggregate(records []trace.Record, pricing cost.Pricing) (Result, error) {
+	return AggregateWithKnobs(records, pricing, Knobs{})
+}
+
+// AggregateWithKnobs is Aggregate with what-if multipliers applied to every
+// call's cost (see Knobs). With the zero Knobs it is identical to Aggregate.
+func AggregateWithKnobs(records []trace.Record, pricing cost.Pricing, knobs Knobs) (Result, error) {
 	type runKey struct{ scenario, run string }
 
 	runs := make(map[runKey]*Run)
@@ -81,11 +131,12 @@ func Aggregate(records []trace.Record, pricing cost.Pricing) (Result, error) {
 			OutputTokens: rec.OutputTokens,
 			CachedTokens: rec.CachedTokens,
 		}
-		c, err := pricing.Cost(rec.Model, u)
+		b, err := pricing.Breakdown(rec.Model, u)
 		if err != nil {
 			return Result{}, fmt.Errorf("aggregate: scenario %q run %q seq %d: %w",
 				rec.ScenarioID, rec.RunID, rec.Seq, err)
 		}
+		c := knobs.apply(b)
 
 		k := runKey{rec.ScenarioID, rec.RunID}
 		r, ok := runs[k]

@@ -1,0 +1,144 @@
+name: "Augur cost gate"
+description: "Project an AI agent's production cost from a recorded trace and fail the PR if it's over budget."
+branding:
+  icon: "dollar-sign"
+  color: "purple"
+
+inputs:
+  trace:
+    description: "Path to the cost trace (JSONL). Ignored if `cassette` is set."
+    default: "trace.jsonl"
+  pricing:
+    description: "Path to the pricing snapshot."
+    default: "pricing.yaml"
+  tco:
+    description: "Path to a self-hosted TCO config. Overrides `pricing` when set."
+    default: ""
+  traffic:
+    description: "Path to the traffic profile."
+    default: "traffic.yaml"
+  budget:
+    description: "Path to the budget thresholds."
+    default: "budget.yaml"
+  scenarios:
+    description: "Path to scenarios.yaml. Only used when replaying a cassette."
+    default: "scenarios.yaml"
+  cassette:
+    description: "If set, replay this cassette to regenerate the trace (no tokens spent). Requires the agent command to be runnable in CI."
+    default: ""
+  extra-args:
+    description: "Extra flags passed to `augur gate` (e.g. what-if knobs: --context-growth 1.5)."
+    default: ""
+  comment:
+    description: "Post (or update) the report as a PR comment."
+    default: "true"
+  working-directory:
+    description: "Directory the config files live in."
+    default: "."
+  go-version:
+    description: "Go version used to build augur."
+    default: "1.25"
+
+outputs:
+  pass:
+    description: "'true' if within budget, 'false' if over."
+    value: ${{ steps.gate.outputs.pass }}
+  report-path:
+    description: "Absolute path to the generated Markdown report."
+    value: ${{ steps.gate.outputs.report-path }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ inputs.go-version }}
+
+    - name: Build augur
+      shell: bash
+      run: |
+        cd "${{ github.action_path }}"
+        go build -o "${RUNNER_TEMP}/augur" .
+        echo "AUGUR=${RUNNER_TEMP}/augur" >> "$GITHUB_ENV"
+
+    - name: Replay cassette
+      if: ${{ inputs.cassette != '' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        "$AUGUR" run \
+          --scenarios "${{ inputs.scenarios }}" \
+          --replay "${{ inputs.cassette }}" \
+          --trace "${{ inputs.trace }}"
+
+    - name: Augur gate
+      id: gate
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        pricing_args="--pricing ${{ inputs.pricing }}"
+        if [ -n "${{ inputs.tco }}" ]; then
+          pricing_args="--tco ${{ inputs.tco }}"
+        fi
+
+        set +e
+        "$AUGUR" gate \
+          --trace "${{ inputs.trace }}" \
+          $pricing_args \
+          --traffic "${{ inputs.traffic }}" \
+          --budget "${{ inputs.budget }}" \
+          --report-md augur-report.md \
+          --report-json augur-report.json \
+          ${{ inputs.extra-args }}
+        code=$?
+        set -e
+
+        if [ "$code" -eq 0 ]; then
+          echo "pass=true" >> "$GITHUB_OUTPUT"
+        elif [ -f augur-report.md ]; then
+          # Report exists => a genuine over-budget verdict (not an internal error).
+          echo "pass=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "::error::augur gate failed before producing a report (exit $code)"
+          exit "$code"
+        fi
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        echo "report-path=$(pwd)/augur-report.md" >> "$GITHUB_OUTPUT"
+
+    - name: Post report comment
+      if: ${{ always() && inputs.comment == 'true' && github.event_name == 'pull_request' && steps.gate.outputs.report-path != '' }}
+      uses: actions/github-script@v7
+      env:
+        AUGUR_REPORT_PATH: ${{ steps.gate.outputs.report-path }}
+      with:
+        script: |
+          const fs = require('fs');
+          const marker = '<!-- augur-cost-report -->';
+          let report;
+          try {
+            report = fs.readFileSync(process.env.AUGUR_REPORT_PATH, 'utf8');
+          } catch (e) {
+            report = '_Augur produced no report._';
+          }
+          const body = `${marker}\n${report}`;
+          const { owner, repo } = context.repo;
+          const issue_number = context.issue.number;
+          const comments = await github.paginate(github.rest.issues.listComments, {
+            owner, repo, issue_number,
+          });
+          const existing = comments.find(c => c.body && c.body.includes(marker));
+          if (existing) {
+            await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+          } else {
+            await github.rest.issues.createComment({ owner, repo, issue_number, body });
+          }
+
+    - name: Enforce budget
+      shell: bash
+      run: |
+        if [ "${{ steps.gate.outputs.pass }}" != "true" ]; then
+          echo "::error::Augur: projected cost is over budget — see the report comment."
+          exit 1
+        fi
+        echo "Augur: within budget."

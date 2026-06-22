@@ -12,8 +12,43 @@ import (
 // response's Content-Type rather than the request's stream flag because the
 // response is the source of truth for how the body must be relayed.
 func isEventStream(h http.Header) bool {
-	ct := h.Get("Content-Type")
+	return isEventStreamCT(h.Get("Content-Type"))
+}
+
+// isEventStreamCT reports whether a Content-Type value denotes SSE.
+func isEventStreamCT(ct string) bool {
 	return strings.HasPrefix(strings.TrimSpace(strings.ToLower(ct)), "text/event-stream")
+}
+
+// extractUsage parses token usage and the resolved model from a COMPLETE
+// response body, handling both a single JSON object and a full SSE stream. The
+// buffered and replay paths use it so a recorded streaming response is costed
+// the same as it was live.
+func extractUsage(contentType string, body []byte) (oaiUsage, string) {
+	if isEventStreamCT(contentType) {
+		return usageFromSSE(body)
+	}
+	return usageFromResponse(body)
+}
+
+// usageFromSSE scans a buffered SSE body line-by-line for the usage block and
+// the resolved model, mirroring what streamResponse captures while relaying.
+func usageFromSSE(body []byte) (oaiUsage, string) {
+	var (
+		usage oaiUsage
+		model string
+	)
+	for line := range bytes.SplitSeq(body, []byte("\n")) {
+		if u, has, m := parseSSEChunk(line); m != "" || has {
+			if m != "" {
+				model = m
+			}
+			if has {
+				usage = u
+			}
+		}
+	}
+	return usage, model
 }
 
 // streamResponse relays an SSE body to the client chunk-by-chunk, flushing after

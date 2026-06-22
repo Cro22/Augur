@@ -7,7 +7,6 @@ import (
 	"os"
 
 	"augur/aggregate"
-	"augur/cost"
 	"augur/gate"
 	"augur/project"
 	"augur/trace"
@@ -21,6 +20,7 @@ func runGate(args []string) error {
 	fs := flag.NewFlagSet("gate", flag.ContinueOnError)
 	tracePath := fs.String("trace", "trace.jsonl", "path to the cost trace (JSONL)")
 	pricingPath := fs.String("pricing", "pricing.yaml", "path to the pricing snapshot")
+	tcoPath := fs.String("tco", "", "derive pricing from a self-hosted TCO config instead of -pricing")
 	trafficPath := fs.String("traffic", "traffic.yaml", "path to the traffic profile")
 	budgetPath := fs.String("budget", "budget.yaml", "path to the budget thresholds")
 	reportMD := fs.String("report-md", "report.md", "path to write the Markdown report (empty to skip)")
@@ -28,15 +28,17 @@ func runGate(args []string) error {
 	ciLevel := fs.Float64("ci", 0.95, "confidence level for bootstrap intervals (0..1)")
 	bootstrap := fs.Int("bootstrap", 2000, "number of bootstrap resamples")
 	seed := fs.Uint64("seed", 1, "PRNG seed for reproducible bootstrap intervals")
+	knobFs := addKnobFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	knobs := knobFs.knobs()
 
 	records, err := readTrace(*tracePath)
 	if err != nil {
 		return err
 	}
-	pricing, err := cost.LoadPricing(*pricingPath)
+	pricing, err := resolvePricing(*pricingPath, *tcoPath)
 	if err != nil {
 		return err
 	}
@@ -49,7 +51,7 @@ func runGate(args []string) error {
 		return err
 	}
 
-	res, err := aggregate.Aggregate(records, pricing)
+	res, err := aggregate.AggregateWithKnobs(records, pricing, knobs)
 	if err != nil {
 		return err
 	}
@@ -59,6 +61,7 @@ func runGate(args []string) error {
 	if err != nil {
 		return err
 	}
+	proj.WhatIf = describeKnobs(knobs)
 
 	report := gate.NewReport(proj, gate.Evaluate(proj, budget))
 
