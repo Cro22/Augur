@@ -7,14 +7,28 @@ is ordinary JSONL, so ``augur aggregate | project | gate`` consume it with no
 knowledge that a model, not a proxy, wrote it. That is the loose coupling the
 SPEC asks for: the file is the whole interface.
 
-Determinism is deliberate. emit-trace seeds a numpy RNG (default fixed) so the
-same model and flags reproduce the same trace — the record/replay ethos of the
-Go side carried into the predictive path. Vary ``--seed`` to draw a different
-sample from the same learned distribution.
+**Run-level correlation.** A naive synthesis samples every call independently,
+which understates the variance of the per-run total — yet the gate aggregates to
+per-run cost and then takes its p95, so that run-level spread is exactly what is
+gated. Real runs are correlated: a verbose run is verbose across all its calls; a
+retry storm correlates. We model this with a Gaussian copula. Each run draws one
+latent ``z_run``; each call blends it with its own idiosyncratic draw:
+
+    z_call = √ρ · z_run + √(1-ρ) · z_idio      (still standard normal)
+
+``--run-correlation ρ`` ranges from 0 (independent, the original behaviour) to 1
+(every call in a run shares one percentile). The same ``z`` drives both modes:
+gaussian uses it as the standardised residual, quantile maps it to u = Φ(z) and
+inverts the conditional CDF — so the *skew* of the fitted tail survives.
+
+Determinism is deliberate. emit-trace seeds a numpy RNG so the same model and
+flags reproduce the same trace — the record/replay ethos of the Go side carried
+into the predictive path. Vary ``--seed`` to draw a different sample.
 """
 
 from __future__ import annotations
 
+import math
 from typing import List, Optional
 
 import numpy as np
@@ -35,16 +49,17 @@ def emit(
     seed: int = 0,
     scenario_filter: Optional[str] = None,
     run_prefix: str = "pred",
+    run_correlation: float = 0.0,
 ) -> List[Record]:
     """Generate ``runs`` synthetic runs by resampling and rescaling templates.
 
     For each synthetic run we take an observed template (cycling through them in
     order, so the scenario mix is preserved), scale every call's prompt by
-    ``input_scale``, then predict each call's output from the model: the point
-    prediction plus Gaussian noise at the fit's residual spread, clipped at zero
-    and rounded. Sampling the spread — not just the mean — is what keeps the
-    predicted *distribution* (and therefore the p95 the gate cares about) honest
-    rather than collapsing every run to the average.
+    ``input_scale``, then predict each call's output from the model at a latent
+    ``z`` that carries the run-level correlation (see module docstring). Sampling
+    the spread — not just the mean — is what keeps the predicted *distribution*
+    (and therefore the p95 the gate cares about) honest rather than collapsing
+    every run to the average.
 
     ``input_scale`` is the predictive analogue of the Go ``--context-growth``
     knob, but it does more: it also feeds the larger prompt back through the
@@ -55,6 +70,8 @@ def emit(
         return []
     if input_scale <= 0:
         raise ValueError("input_scale must be positive")
+    if not (0.0 <= run_correlation <= 1.0):
+        raise ValueError("run_correlation must be in [0, 1]")
 
     templates = model.templates
     if scenario_filter is not None:
@@ -64,12 +81,15 @@ def emit(
                          + (f" for scenario {scenario_filter!r}" if scenario_filter else ""))
 
     rng = np.random.default_rng(seed)
+    a_shared = math.sqrt(run_correlation)
+    a_idio = math.sqrt(1.0 - run_correlation)
     out: List[Record] = []
     width = max(4, len(str(runs)))
 
     for i in range(runs):
         template = templates[i % len(templates)]
         run_id = f"{run_prefix}-{i:0{width}d}"
+        z_run = float(rng.standard_normal())
         for call in template.calls:
             fit = model.fit_for(call.model)
             scaled_input = int(round(call.input_tokens * input_scale))
@@ -78,14 +98,13 @@ def emit(
             # row fail cost.Usage.Validate on the Go side.
             scaled_cached = min(scaled_input, int(round(call.cached_tokens * input_scale)))
 
+            z = a_shared * z_run + a_idio * float(rng.standard_normal())
             if fit is None:
                 # A model present in the templates but with no successful calls
-                # to learn from: keep the observed output as the best we have.
-                predicted = call_output_fallback(call)
+                # to learn from: nothing to predict, emit a conservative zero.
+                predicted = 0
             else:
-                mean = fit.predict(scaled_input)
-                noisy = mean + rng.normal(0.0, fit.resid_std) if fit.resid_std > 0 else mean
-                predicted = int(round(max(0.0, noisy)))
+                predicted = fit.sample(scaled_input, z)
 
             out.append(Record(
                 scenario_id=template.scenario_id,
@@ -101,9 +120,3 @@ def emit(
                 status=200,
             ))
     return out
-
-
-def call_output_fallback(call) -> int:
-    """Output for a call whose model has no fit — there is nothing to predict
-    from, so emit zero and let the (rare) case be visibly conservative."""
-    return 0

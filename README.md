@@ -204,8 +204,11 @@ augur gate --trace grown.jsonl --traffic traffic.yaml --budget budget.yaml
 Coupling is the trace file and nothing else — no RPC, no shared library. Unlike
 `--context-growth`, the sidecar feeds the larger prompt *back through the output
 model*, so a bigger ask predicts a longer answer, not just a costlier prompt.
-The fit is an honest linear baseline (it reports R² and falls back to the mean
-when the signal is weak). See [`sidecar/README.md`](sidecar/README.md).
+The default fit is an honest linear baseline (it reports R² and falls back to the
+mean when the signal is weak); `--dist quantile` fits conditional quantiles
+directly to model the right-skewed tail the gate's p95 lives in, and
+`--run-correlation` widens the per-run spread to match correlated runs. See
+[`sidecar/README.md`](sidecar/README.md).
 
 ### Self-hosted models (TCO)
 

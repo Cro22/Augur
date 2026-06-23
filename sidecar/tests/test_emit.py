@@ -87,3 +87,58 @@ def test_unknown_scenario_filter_raises():
 def test_run_ids_use_prefix():
     out = emit(_model(), runs=3, seed=0, run_prefix="whatif")
     assert all(r.run_id.startswith("whatif-") for r in out)
+
+
+def _two_call_model(noise=60.0, n=60):
+    """A two-call run whose output variance is dominated by residual noise, not
+    by input variation — so the run-level correlation (which acts on the
+    residual) is the main driver of the per-run total spread and the effect is
+    visible rather than swamped by between-run input differences."""
+    rng = np.random.default_rng(9)
+    recs = []
+    for i in range(n):
+        # fixed inputs across runs: the only run-to-run variation is the noise
+        recs.append(Record("s1", f"r{i}", 0, "m", 600,
+                            int(max(1, 200 + rng.normal(0, noise)))))
+        recs.append(Record("s1", f"r{i}", 1, "m", 600,
+                            int(max(1, 200 + rng.normal(0, noise)))))
+    return fit(recs)
+
+
+def _per_run_totals(records):
+    totals = {}
+    for r in records:
+        totals[r.run_id] = totals.get(r.run_id, 0) + r.output_tokens
+    return np.array(list(totals.values()), dtype=float)
+
+
+def test_run_correlation_widens_per_run_total_variance():
+    """The reason it exists: shared verbosity inflates the per-run total spread,
+    which is what the gate's p95 is taken over."""
+    m = _two_call_model()
+    indep = _per_run_totals(emit(m, runs=400, seed=1, run_correlation=0.0))
+    corr = _per_run_totals(emit(m, runs=400, seed=1, run_correlation=0.9))
+    assert corr.var() > indep.var() * 1.2
+
+
+def test_run_correlation_out_of_range_raises():
+    with pytest.raises(ValueError, match="run_correlation"):
+        emit(_model(), runs=2, run_correlation=1.5)
+    with pytest.raises(ValueError, match="run_correlation"):
+        emit(_model(), runs=2, run_correlation=-0.1)
+
+
+def test_emit_quantile_model_is_valid_and_deterministic():
+    rng = np.random.default_rng(2)
+    recs = []
+    for i in range(120):
+        x = int(rng.uniform(200, 2000))
+        y = int(max(1, round((30 + 0.2 * x) * np.exp(rng.normal(0, 0.35)))))
+        recs.append(Record("s1", f"r{i}", 0, "m", x, y, cached_tokens=int(x * 0.1)))
+    m = fit(recs, dist="quantile")
+    a = emit(m, runs=20, seed=5, input_scale=1.5)
+    b = emit(m, runs=20, seed=5, input_scale=1.5)
+    assert [r.output_tokens for r in a] == [r.output_tokens for r in b]
+    for r in a:
+        assert r.output_tokens >= 0
+        assert r.cached_tokens <= r.input_tokens
