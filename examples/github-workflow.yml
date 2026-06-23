@@ -19,9 +19,9 @@ jobs:
       - uses: actions/checkout@v4
 
       # Replace with the published action ref, e.g.:
-      #   uses: your-org/augur@v1
+      #   uses: Cro22/augur@v1
       # (Within the Augur repo itself, `uses: ./` runs the local action.)
-      - uses: your-org/augur@v1
+      - uses: Cro22/augur@v1
         with:
           # Replay a committed cassette so CI spends no tokens. Drop `cassette`
           # and point `trace` at a committed trace.jsonl if you don't run the
