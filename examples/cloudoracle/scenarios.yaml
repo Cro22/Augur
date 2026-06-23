@@ -1,0 +1,28 @@
+# Augur dogfood scenarios — CloudOracle's Insights Agent
+#
+# Representative FinOps questions a user asks the agent. They deliberately spread
+# across the three specialists (cost_analyst / savings_advisor / concept_expert)
+# and include a multi-step one, so the captured trace shows the real supervisor
+# fan-out — not a single-call happy path.
+#
+# Consumed by augur_dogfood.py, which runs each `input` against the agent `runs`
+# times and writes a row per LLM call (supervisor + specialists + synthesizer +
+# LLM judge) to trace.jsonl.
+
+# Repetitions per scenario. The agent is non-deterministic (routing, tool loops,
+# output length vary), so we want the cost DISTRIBUTION, not one sample. Kept low
+# because each run spends real Gemini tokens across several calls.
+runs: 3
+
+# Default model to tag calls with when the provider doesn't echo one back.
+model: gemini-2.5-flash
+
+scenarios:
+  - id: cost-breakdown
+    input: "What are my total cloud costs this month, broken down by service?"
+  - id: find-savings
+    input: "Where can I save money? Show me the top optimization recommendations and why."
+  - id: concept-rightsizing
+    input: "What is rightsizing, and when should I buy reserved instances instead?"
+  - id: full-review
+    input: "Give me a full cost review: current spend, the biggest source of waste, and how to fix it."

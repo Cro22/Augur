@@ -1,0 +1,17 @@
+# Augur — budget for the CloudOracle Insights Agent dogfood
+#
+# Thresholds the projected unit economics must stay within or `augur gate` fails
+# the build. The per-request check uses p95 (the tail is where the cost surprise
+# lives). Tuned around a Gemini-2.5-Flash multi-specialist agent; adjust to taste
+# after seeing the first projection.
+
+version: 1
+
+# Cap the p95 cost of a single agent question.
+max_request_p95_usd: 0.02
+
+# Cap the projected cost per tenant per month.
+max_tenant_per_month_usd: 200
+
+# Cap the projected total monthly bill.
+max_monthly_bill_usd: 3000

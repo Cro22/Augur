@@ -37,6 +37,8 @@ go.work.sum
 /report.json
 /model.json
 /predicted-trace.jsonl
+/cloudoracle-trace.jsonl
+/cloudoracle-model.json
 
 # Python sidecar artifacts
 __pycache__/

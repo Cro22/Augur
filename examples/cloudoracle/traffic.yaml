@@ -1,0 +1,24 @@
+# Augur — traffic profile for the CloudOracle Insights Agent dogfood
+#
+# Production assumptions for projecting the observed per-run cost to scale. These
+# are a FORECAST (yours), not measured by Augur. Modelled as an internal FinOps
+# assistant: an ops/eng org where engineers ask it cost questions through the day.
+
+version: 1
+
+# Projected population: ~500 engineers, a handful of agent questions each per day.
+users: 500
+requests_per_user_per_day: 4
+
+# Multi-tenant SaaS framing: offered to 20 customer orgs.
+tenants: 20
+
+days_per_month: 30
+
+# Mix of question types in production. Concept questions are cheap and common;
+# the full review is the heavy multi-specialist path. Weights need not sum to 1.
+scenario_mix:
+  cost-breakdown: 0.30
+  find-savings: 0.25
+  concept-rightsizing: 0.30
+  full-review: 0.15
