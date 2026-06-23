@@ -35,3 +35,14 @@ go.work.sum
 /trace.jsonl
 /report.md
 /report.json
+/model.json
+/predicted-trace.jsonl
+/cloudoracle-trace.jsonl
+/cloudoracle-model.json
+
+# Python sidecar artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/

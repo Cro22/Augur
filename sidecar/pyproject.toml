@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "augur-predict"
+version = "0.1.0"
+description = "Augur's optional predictive output-length sidecar (Hito 5)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Jesús Nuñez" }]
+dependencies = ["numpy>=1.24", "scipy>=1.10"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+augur-predict = "augur_predict.cli:main"
+
+[tool.setuptools]
+packages = ["augur_predict"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

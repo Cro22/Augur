@@ -182,6 +182,34 @@ Retries and fan-out scale the whole call (more calls); context growth inflates
 only the prompt side, not the completion — so the model reflects *which* driver
 moved, not a flat fudge factor.
 
+### Predict cost without running (Python sidecar)
+
+The what-if knobs above re-cost a recorded trace, but they hold output length
+fixed. The one thing you genuinely can't guess for an agent is **completion
+length** — and it's where the cost surprise lives. The optional
+[`sidecar/`](sidecar/) (Python) learns output length from a recorded trace, then
+projects cost for inputs you never ran:
+
+```sh
+# Learn output_tokens ≈ a + b·input_tokens per model, from one recorded run.
+python -m augur_predict fit --trace trace.jsonl --out model.json
+
+# "What if prompts grow 1.5× as conversations lengthen?" — predict, don't run.
+python -m augur_predict emit-trace --model model.json --out grown.jsonl --input-scale 1.5
+
+# The predicted trace flows through the normal gate — no tokens spent.
+augur gate --trace grown.jsonl --traffic traffic.yaml --budget budget.yaml
+```
+
+Coupling is the trace file and nothing else — no RPC, no shared library. Unlike
+`--context-growth`, the sidecar feeds the larger prompt *back through the output
+model*, so a bigger ask predicts a longer answer, not just a costlier prompt.
+The default fit is an honest linear baseline (it reports R² and falls back to the
+mean when the signal is weak); `--dist quantile` fits conditional quantiles
+directly to model the right-skewed tail the gate's p95 lives in, and
+`--run-correlation` widens the per-run spread to match correlated runs. See
+[`sidecar/README.md`](sidecar/README.md).
+
 ### Self-hosted models (TCO)
 
 For a model you run yourself there's no per-token API price — you pay for an
@@ -252,7 +280,8 @@ example.
   truthfully. Classifying those calls into retries vs sub-agent fan-out needs
   labeling the trace does not yet carry.
 - **Running the agent in CI spends real tokens.** Keep the scenario set small and
-  `runs` modest; a record-once/replay mode is on the roadmap.
+  `runs` modest, or record once and replay (`--record`/`--replay`) so CI pushes
+  spend nothing.
 
 ## Status
 
@@ -266,12 +295,41 @@ dependency is `gopkg.in/yaml.v3`):
 | Hito 2 | scenario runner + per-scenario aggregation |
 | Hito 3 | projection engine with bootstrap confidence intervals |
 | Hito 4 | budget gate + Markdown/JSON report + CI exit codes |
-| Hito 5 | record/replay cassette (`--record`/`--replay`), what-if knobs (`--retry-rate`/`--fanout`/`--context-growth`), self-hosted TCO mode (`augur tco`, `--tco`), GitHub Action (`action.yml`) |
+| Hito 5 | record/replay cassette (`--record`/`--replay`), what-if knobs (`--retry-rate`/`--fanout`/`--context-growth`), self-hosted TCO mode (`augur tco`, `--tco`), GitHub Action (`action.yml`), Python output-length prediction sidecar ([`sidecar/`](sidecar/)) |
 
-**Roadmap (stretch):** a Python output-length prediction sidecar (the analytical
-piece that would earn a second language).
+Every SPEC milestone and stretch is implemented. The Go core is pure Go (only
+external dependency `gopkg.in/yaml.v3`); the optional prediction sidecar is
+Python (numpy + scipy), coupled to the core through the trace file alone.
 
 See [`SPEC.md`](SPEC.md) for the full design.
+
+## Dogfooded on a real agent
+
+Augur has been run against a real, non-trivial agent — the Insights Agent from
+its sibling project [**CloudOracle**](https://github.com/Cro22/CloudOracle) (a
+LangGraph supervisor multi-agent with tool calls and guardrails), not just
+synthetic traces. CloudOracle is FinOps for *cloud* (runtime); Augur is FinOps
+for *AI agents* (pre-prod) — dogfooding one on the other closes the loop.
+
+Because that agent talks to its model natively through LangChain (no OpenAI
+`base_url`), the capture used the SPEC's documented proxy fallback (ADR D1): a
+LangChain **callback shim** that writes Augur's trace schema from the usage every
+call reports — *without editing CloudOracle*. Full walkthrough and harness:
+[`examples/cloudoracle/`](examples/cloudoracle/).
+
+**What it found (Claude Haiku 4.5, 20 runs): gate PASS** at `$/request p95
+$0.0198` (budget $0.02). The headline is the `find-savings` scenario — its **p95
+cost is 2.3× its median**, driven by a call-count tail (5 → 13 calls/run when the
+savings specialist's tool loop keeps going). That agentic cost driver, observed on
+a real agent, is exactly what Augur exists to catch; gating on the mean would hide
+it.
+
+Dogfooding also surfaced real findings *about the agent* — it isn't
+provider-portable (its LLM judge sends a system-only message Anthropic rejects but
+Gemini tolerates), Claude Haiku hallucinates dollar figures that trip the agent's
+grounding check, and the sidecar's input→output signal is weak there (output
+length is driven by call *role*, not prompt size). Details in the
+[example README](examples/cloudoracle/README.md).
 
 ## Naming
 

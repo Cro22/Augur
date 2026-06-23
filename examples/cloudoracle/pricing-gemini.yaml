@@ -1,0 +1,30 @@
+# Augur — pricing snapshot for the CloudOracle dogfood (Gemini)
+#
+# Prices are USD per 1,000,000 tokens (per Mtok). DATED SNAPSHOT, copied by hand
+# from Google's public Gemini API pricing — APPROXIMATE, verify before quoting.
+# Provider prices drift; this exists so `augur gate` can price the agent's trace.
+#
+#   input         USD/Mtok for non-cached prompt tokens
+#   output        USD/Mtok for completion tokens (Gemini bills "thinking" here)
+#   cached_input  USD/Mtok for context-cached prompt tokens (a subset of input)
+
+version: 1
+snapshot_date: "2026-06-22"
+currency: USD
+unit: per_mtok
+
+models:
+  # Chat model the Insights Agent runs on (supervisor, specialists, synthesizer,
+  # LLM judge). Gemini 2.5 Flash standard tier (<=200k context).
+  gemini-2.5-flash:
+    input: 0.30
+    output: 2.50
+    cached_input: 0.075
+
+  # RAG embeddings (only billed when DATABASE_URL is set and the run uses the
+  # knowledge tool). Free tier at the snapshot date; listed so an embeddings call
+  # is priceable rather than an unknown-model hard error.
+  text-embedding-004:
+    input: 0.0
+    output: 0.0
+    cached_input: 0.0
