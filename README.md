@@ -243,7 +243,7 @@ jobs:
       pull-requests: write   # to post the report comment
     steps:
       - uses: actions/checkout@v4
-      - uses: your-org/augur@v1
+      - uses: Cro22/augur@v1
         with:
           cassette: cassette.jsonl   # replay → zero tokens
           traffic: traffic.yaml
