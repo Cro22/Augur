@@ -299,9 +299,37 @@ dependency is `gopkg.in/yaml.v3`):
 
 Every SPEC milestone and stretch is implemented. The Go core is pure Go (only
 external dependency `gopkg.in/yaml.v3`); the optional prediction sidecar is
-Python (numpy), coupled to the core through the trace file alone.
+Python (numpy + scipy), coupled to the core through the trace file alone.
 
 See [`SPEC.md`](SPEC.md) for the full design.
+
+## Dogfooded on a real agent
+
+Augur has been run against a real, non-trivial agent — the Insights Agent from
+its sibling project [**CloudOracle**](https://github.com/Cro22/CloudOracle) (a
+LangGraph supervisor multi-agent with tool calls and guardrails), not just
+synthetic traces. CloudOracle is FinOps for *cloud* (runtime); Augur is FinOps
+for *AI agents* (pre-prod) — dogfooding one on the other closes the loop.
+
+Because that agent talks to its model natively through LangChain (no OpenAI
+`base_url`), the capture used the SPEC's documented proxy fallback (ADR D1): a
+LangChain **callback shim** that writes Augur's trace schema from the usage every
+call reports — *without editing CloudOracle*. Full walkthrough and harness:
+[`examples/cloudoracle/`](examples/cloudoracle/).
+
+**What it found (Claude Haiku 4.5, 20 runs): gate PASS** at `$/request p95
+$0.0198` (budget $0.02). The headline is the `find-savings` scenario — its **p95
+cost is 2.3× its median**, driven by a call-count tail (5 → 13 calls/run when the
+savings specialist's tool loop keeps going). That agentic cost driver, observed on
+a real agent, is exactly what Augur exists to catch; gating on the mean would hide
+it.
+
+Dogfooding also surfaced real findings *about the agent* — it isn't
+provider-portable (its LLM judge sends a system-only message Anthropic rejects but
+Gemini tolerates), Claude Haiku hallucinates dollar figures that trip the agent's
+grounding check, and the sidecar's input→output signal is weak there (output
+length is driven by call *role*, not prompt size). Details in the
+[example README](examples/cloudoracle/README.md).
 
 ## Naming
 

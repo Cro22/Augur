@@ -177,6 +177,7 @@ budget.yaml ──┐││                                  LLM calls (base_url
 ## 10. Open questions for Jesús (decide before/at Hito 0)
 
 1. **First dogfood target.** Strong candidate: **CloudOracle's own Insights Agent** (LangGraph multi-agent + RAG = real, messy cost drivers, and it ties the two repos together in the story). Alternatives: a toy LangGraph agent, or Despachito if it gains an LLM feature. → *Recommend CloudOracle's Insights Agent.*
+   - **✅ Resolved (done).** Dogfooded on [CloudOracle's Insights Agent](https://github.com/Cro22/CloudOracle) via a LangChain callback shim (ADR D1's proxy fallback — the agent speaks its model natively), CloudOracle source untouched. Gate PASS; the `find-savings` scenario showed a real call-count tail (p95 2.3× median). Harness + findings: [`examples/cloudoracle/`](examples/cloudoracle/).
 2. **Pricing data:** ship a dated snapshot only (v1), or attempt a live fetch?
 3. **CI token-cost tolerance:** how much real spend per CI run is acceptable? This decides whether record/replay is v1 or stretch.
 4. **Proxy vs harness for the runner:** does Jesús want the tool to *drive* the agent (needs an entrypoint contract), or just provide the proxy + headers and let the user run their own harness? (Lighter v1 = the latter.)

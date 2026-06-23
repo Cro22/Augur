@@ -1,8 +1,13 @@
 # Dogfooding Augur on CloudOracle's Insights Agent
 
-> Augur measuring a *real* agent, not a synthetic trace: the
-> [CloudOracle](https://github.com/) Insights Agent — a LangGraph supervisor
+> Augur measuring a *real* agent, not a synthetic trace: the Insights Agent from
+> [**CloudOracle**](https://github.com/Cro22/CloudOracle) — a LangGraph supervisor
 > multi-agent with tool calls and guardrails.
+
+CloudOracle is Augur's sibling project: FinOps for *cloud* (runtime, post-hoc),
+where Augur is FinOps for *AI agents* (pre-prod, predictive). Dogfooding Augur on
+CloudOracle's own agent closes the loop between the two — and is the first test of
+Augur against an agent it didn't author.
 
 This is the first dogfood: point Augur at an agent it didn't author and see
 whether the cost picture holds up. It does — and it surfaced real findings,
