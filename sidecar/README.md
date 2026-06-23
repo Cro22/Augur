@@ -1,0 +1,169 @@
+# augur-predict — the predictive output-length sidecar
+
+> Estimate an agent's cost for inputs you **haven't run**, by learning completion
+> length from a trace Augur already recorded.
+
+This is the one piece of Augur the [SPEC](../SPEC.md) deliberately writes in
+Python instead of Go (Hito 5): a small **predictive output-length model**. It is
+optional — delete this directory and Augur's pure-Go v1 is untouched.
+
+## Why it exists
+
+Augur's core measures *real* cost by running your agent through a recording
+proxy. But running spends tokens, and you can't run every hypothetical. The one
+quantity you genuinely cannot guess for an agent is **completion length** — and,
+per Augur's thesis, it's where the cost surprise lives (long outputs in the
+tail). So we learn output length from a recorded trace, then use it to project
+cost for inputs we never executed: a bigger prompt, a context-growth scenario,
+more runs.
+
+This is the PreflightLLMCost direction — an honest linear baseline, not a deep
+model — and it's where a second language earns its place: the analytical fit
+(numpy OLS, residual spread, prediction bands) is more natural in Python, while
+the systems core stays in Go.
+
+## Loose coupling: the trace file is the only contract
+
+The sidecar never calls the Go binary and the Go binary never calls the sidecar.
+They share exactly one thing: the JSONL cost-trace schema. `fit` reads a recorded
+trace; `emit-trace` writes a synthetic one that `augur aggregate | project |
+gate` price with no idea a model — not a proxy — produced it. No RPC, no shared
+library, no import in either direction.
+
+```
+trace.jsonl ──► augur-predict fit ──► model.json
+                                          │
+                       augur-predict emit-trace --input-scale 1.5
+                                          │
+                                          ▼
+                              predicted-trace.jsonl ──► augur aggregate | project | gate
+```
+
+## Install
+
+Needs Python ≥ 3.10 and numpy. No install required to run:
+
+```sh
+cd sidecar
+python -m augur_predict --help          # run in place
+# or:
+pip install -e .                        # exposes the `augur-predict` command
+pip install -e '.[dev]' && pytest       # with the test suite
+```
+
+## Commands
+
+### `fit` — learn the model from a recorded trace
+
+```sh
+python -m augur_predict fit --trace trace.jsonl --out model.json
+```
+
+Fits, **per billed model**, `output_tokens ≈ intercept + slope · input_tokens`
+via OLS, and captures each observed `(scenario, run)` as a *run template* (its
+call-graph: which models, what input sizes, in what order). Only successful
+calls feed the regression; a failed-but-billed call (a 429 that burned input and
+produced nothing) would distort an output-length fit, so it's excluded — but it
+still contributes its structure to the templates, because it's part of the call
+graph `emit-trace` replays.
+
+### `report` — is the fit worth trusting?
+
+```sh
+python -m augur_predict report --model model.json
+```
+
+```
+Output-length model  (source: trace.jsonl)
+  100 calls, 50 run templates, 2 model(s)
+
+  model                 n  method      out~in     R2   ±resid
+  ----------------------------------------------------------
+  gpt-4o               50   ols    65+0.299·in   0.97       30
+  gpt-4o-mini          50   ols    22+0.017·in   0.60        5
+```
+
+Honesty is a first-class output. With too few points or no spread in the inputs,
+a slope is noise: the model degrades to predicting the **mean** output
+(`method=mean`) and says so. A low R² is flagged. This mirrors the Go side
+reporting confidence intervals instead of bare point estimates.
+
+### `predict` — one input size
+
+```sh
+python -m augur_predict predict --model model.json \
+    --model-name gpt-4o --input-tokens 3000 --price-out 10.0
+```
+
+```
+model=gpt-4o input_tokens=3000.0
+  predicted output tokens: 962  (~95% band 903–1021, method=ols)
+  est. output cost @ $10.0/Mtok: $0.009622  (p~95 $0.010214)
+```
+
+The `~95%` band comes from the fit's residual spread. `--price-out` is optional
+and prices only the *completion* side — the unknown the sidecar models; the
+prompt cost is already exact from the input you supplied. Full per-call pricing
+lives in the Go `aggregate` stage, which `emit-trace` feeds.
+
+### `emit-trace` — a predicted trace for the Go gate
+
+```sh
+python -m augur_predict emit-trace --model model.json \
+    --out predicted-trace.jsonl --runs 50 --input-scale 1.5 --seed 7
+```
+
+Resamples the run templates, scales every prompt by `--input-scale`, and predicts
+each call's output (the point prediction plus Gaussian noise at the fit's
+residual spread, so the predicted *distribution* — and the p95 the gate cares
+about — stays honest instead of collapsing to the average). The result is an
+ordinary trace:
+
+```sh
+augur aggregate --trace predicted-trace.jsonl
+augur gate --trace predicted-trace.jsonl --traffic traffic.yaml --budget budget.yaml
+```
+
+`--input-scale` is the predictive analogue of the Go `--context-growth` knob, but
+it does more: it feeds the larger prompt *back through the output model*, so a
+bigger ask predicts a longer answer — not just a costlier prompt. Emission is
+**deterministic per `--seed`** (same seed → same trace), carrying the Go side's
+record/replay determinism into the predictive path.
+
+## Worked example
+
+```sh
+augur run --scenarios scenarios.yaml --upstream https://api.openai.com   # record once
+python -m augur_predict fit --trace trace.jsonl --out model.json
+# "What if prompts grow 1.5× as conversations lengthen?" — no agent re-run:
+python -m augur_predict emit-trace --model model.json --out grown.jsonl --input-scale 1.5
+augur gate --trace grown.jsonl --traffic traffic.yaml --budget budget.yaml
+```
+
+In Augur's own test of this chain, the recorded trace passed the budget
+(~$15.3k/month) while the 1.5× predicted trace failed it (~$22.4k/month, over a
+$20k cap) — the cost regression caught *before* anyone ran the bigger workload.
+
+## Honest limitations
+
+- **It's a linear baseline.** `output ≈ a + b·input` is the simplest signal that
+  correlates, not a claim that prompt length *determines* output length. When it
+  doesn't (low R²), the model falls back to the mean and the report flags it.
+  Don't read more into a prediction than its R² and residual band support.
+- **It can't invent structure it never saw.** `emit-trace` resamples observed run
+  templates; it cannot predict a call path the agent never took in the recorded
+  trace. Representativeness of the original run still bounds everything.
+- **Output noise is modelled as Gaussian** around the fit. Real completion-length
+  distributions are often skewed; the band is a first-order approximation, fine
+  for projection but not a precise tail model.
+
+## Tests
+
+```sh
+cd sidecar && pytest -q
+```
+
+Covers the trace round-trip and Go-schema contract, OLS recovery of a known
+slope/intercept, the mean fallback, prediction clipping/bands, and `emit-trace`
+determinism + validity (cached ≤ input, non-negative tokens) so emitted rows
+never fail the Go cost validator.

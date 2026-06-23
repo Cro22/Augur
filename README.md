@@ -182,6 +182,31 @@ Retries and fan-out scale the whole call (more calls); context growth inflates
 only the prompt side, not the completion — so the model reflects *which* driver
 moved, not a flat fudge factor.
 
+### Predict cost without running (Python sidecar)
+
+The what-if knobs above re-cost a recorded trace, but they hold output length
+fixed. The one thing you genuinely can't guess for an agent is **completion
+length** — and it's where the cost surprise lives. The optional
+[`sidecar/`](sidecar/) (Python) learns output length from a recorded trace, then
+projects cost for inputs you never ran:
+
+```sh
+# Learn output_tokens ≈ a + b·input_tokens per model, from one recorded run.
+python -m augur_predict fit --trace trace.jsonl --out model.json
+
+# "What if prompts grow 1.5× as conversations lengthen?" — predict, don't run.
+python -m augur_predict emit-trace --model model.json --out grown.jsonl --input-scale 1.5
+
+# The predicted trace flows through the normal gate — no tokens spent.
+augur gate --trace grown.jsonl --traffic traffic.yaml --budget budget.yaml
+```
+
+Coupling is the trace file and nothing else — no RPC, no shared library. Unlike
+`--context-growth`, the sidecar feeds the larger prompt *back through the output
+model*, so a bigger ask predicts a longer answer, not just a costlier prompt.
+The fit is an honest linear baseline (it reports R² and falls back to the mean
+when the signal is weak). See [`sidecar/README.md`](sidecar/README.md).
+
 ### Self-hosted models (TCO)
 
 For a model you run yourself there's no per-token API price — you pay for an
@@ -252,7 +277,8 @@ example.
   truthfully. Classifying those calls into retries vs sub-agent fan-out needs
   labeling the trace does not yet carry.
 - **Running the agent in CI spends real tokens.** Keep the scenario set small and
-  `runs` modest; a record-once/replay mode is on the roadmap.
+  `runs` modest, or record once and replay (`--record`/`--replay`) so CI pushes
+  spend nothing.
 
 ## Status
 
@@ -266,10 +292,11 @@ dependency is `gopkg.in/yaml.v3`):
 | Hito 2 | scenario runner + per-scenario aggregation |
 | Hito 3 | projection engine with bootstrap confidence intervals |
 | Hito 4 | budget gate + Markdown/JSON report + CI exit codes |
-| Hito 5 | record/replay cassette (`--record`/`--replay`), what-if knobs (`--retry-rate`/`--fanout`/`--context-growth`), self-hosted TCO mode (`augur tco`, `--tco`), GitHub Action (`action.yml`) |
+| Hito 5 | record/replay cassette (`--record`/`--replay`), what-if knobs (`--retry-rate`/`--fanout`/`--context-growth`), self-hosted TCO mode (`augur tco`, `--tco`), GitHub Action (`action.yml`), Python output-length prediction sidecar ([`sidecar/`](sidecar/)) |
 
-**Roadmap (stretch):** a Python output-length prediction sidecar (the analytical
-piece that would earn a second language).
+Every SPEC milestone and stretch is implemented. The Go core is pure Go (only
+external dependency `gopkg.in/yaml.v3`); the optional prediction sidecar is
+Python (numpy), coupled to the core through the trace file alone.
 
 See [`SPEC.md`](SPEC.md) for the full design.
 
