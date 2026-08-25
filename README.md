@@ -81,7 +81,10 @@ budget.yaml  ───┘                                     │  (distribution
 The proxy captures calls at the **HTTP layer** (you point your agent's
 `base_url` at it), so Augur is framework- and language-agnostic and records the
 *real* call graph — retries and fan-out included — without you rewriting the
-agent.
+agent. It speaks three wire dialects natively — **OpenAI**, **Anthropic**
+(`/v1/messages`, including the cache-read/cache-write token split), and **Gemini**
+(`usageMetadata`) — so you point it at whichever provider your agent already
+uses.
 
 ---
 
@@ -271,14 +274,21 @@ example.
 
 ## Honest limitations
 
-- **Streaming usage** is captured exactly only when the client sets
-  `stream_options.include_usage` (the provider then emits a usage block). Without
-  it, Augur records a zero-token row rather than tokenizing on the proxy side —
-  proxy-side tokenization is fragile (per-model tokenizers) and `include_usage`
-  is the correct, exact path.
-- **Multipliers.** Augur reports *calls per run* — the multiplier it can observe
-  truthfully. Classifying those calls into retries vs sub-agent fan-out needs
-  labeling the trace does not yet carry.
+- **Streaming usage.** For OpenAI streaming, the provider only emits a usage
+  block when the request sets `stream_options.include_usage`. Augur injects that
+  flag automatically (disable with `--inject-usage=false`), so streamed calls are
+  captured exactly rather than as a zero-token row — the trade-off is one extra
+  usage-only SSE chunk the agent receives (benign for standard clients).
+  Anthropic and Gemini report usage on every streamed response with no opt-in.
+- **Multipliers.** Augur reports *calls per run* and splits it into
+  *retries per run* — a call whose request body is byte-identical to an earlier
+  one in the same run, the observable signature of a client-library retry — vs
+  the rest. It still does **not** isolate sub-agent fan-out from sequential
+  tool-loop steps: both are distinct-body calls, and call concurrency isn't
+  visible at the HTTP layer.
+- **Cache-write pricing** is modelled from `cache_write` in `pricing.yaml`
+  (Anthropic's ~1.25x input premium on `cache_creation_input_tokens`). It is a
+  dated snapshot like every other price — verify it against the current page.
 - **Running the agent in CI spends real tokens.** Keep the scenario set small and
   `runs` modest, or record once and replay (`--record`/`--replay`) so CI pushes
   spend nothing.
@@ -316,6 +326,11 @@ Because that agent talks to its model natively through LangChain (no OpenAI
 LangChain **callback shim** that writes Augur's trace schema from the usage every
 call reports — *without editing CloudOracle*. Full walkthrough and harness:
 [`examples/cloudoracle/`](examples/cloudoracle/).
+
+(The proxy now speaks Anthropic's `/v1/messages` natively, so an Anthropic agent
+that *can* set a `base_url` — e.g. LangChain's `ChatAnthropic(base_url=…)` — can
+take the HTTP path directly and skip the shim; the shim remains the fallback for
+frameworks that don't expose a base URL at all.)
 
 **What it found (Claude Haiku 4.5, 20 runs): gate PASS** at `$/request p95
 $0.0198` (budget $0.02). The headline is the `find-savings` scenario — its **p95

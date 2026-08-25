@@ -22,6 +22,10 @@ type yamlPricing struct {
 		// discount → bill cached tokens at the full input rate) from an
 		// explicit 0.0 (a genuinely free cache).
 		CachedInput *float64 `yaml:"cached_input"`
+		// CacheWrite is a pointer for the same reason: omitted → cache-write
+		// tokens are billed at the full input rate (the provider does not charge
+		// a separate write premium). Anthropic models set this ~1.25× input.
+		CacheWrite *float64 `yaml:"cache_write"`
 	} `yaml:"models"`
 }
 
@@ -53,14 +57,19 @@ func ParsePricing(data []byte) (Pricing, error) {
 
 	models := make(map[string]ModelPrice, len(yp.Models))
 	for name, m := range yp.Models {
-		cached := m.Input // default: no cache discount
+		cached := m.Input // default: no cache-read discount
 		if m.CachedInput != nil {
 			cached = *m.CachedInput
+		}
+		write := m.Input // default: no separate cache-write premium
+		if m.CacheWrite != nil {
+			write = *m.CacheWrite
 		}
 		models[name] = ModelPrice{
 			Input:       m.Input,
 			Output:      m.Output,
 			CachedInput: cached,
+			CacheWrite:  write,
 		}
 	}
 

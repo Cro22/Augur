@@ -34,18 +34,25 @@ type ModelPrice struct {
 	// cache. When a model has no cache discount this should equal Input;
 	// LoadPricing fills it in that way when the field is omitted.
 	CachedInput float64
+	// CacheWrite is USD per Mtok for prompt tokens WRITTEN to the provider cache
+	// (Anthropic's cache_creation_input_tokens), typically a premium over Input.
+	// When a provider does not bill cache writes separately this equals Input;
+	// LoadPricing fills it in that way when the field is omitted.
+	CacheWrite float64
 }
 
 // Usage is the token accounting for a single LLM call, mirroring how providers
-// report it. CachedTokens is a SUBSET of InputTokens (the cached portion of the
-// prompt), not an additional bucket — this matches OpenAI's
+// report it. CachedTokens and CacheWriteTokens are both SUBSETS of InputTokens
+// (portions of the prompt), not additional buckets — this matches OpenAI's
 // prompt_tokens / prompt_tokens_details.cached_tokens and Anthropic's
-// cache_read_input_tokens. Billing therefore splits InputTokens into a cached
-// part and a full-price part.
+// cache_read_input_tokens / cache_creation_input_tokens. Billing therefore
+// splits InputTokens into a cached-read part, a cache-write part, and a
+// full-price remainder.
 type Usage struct {
-	InputTokens  int // total prompt tokens, INCLUDING the cached portion
-	OutputTokens int // completion tokens
-	CachedTokens int // cached prompt tokens, billed at the cached rate
+	InputTokens      int // total prompt tokens, INCLUDING the cached and cache-write portions
+	OutputTokens     int // completion tokens
+	CachedTokens     int // cached-read prompt tokens, billed at the cached rate
+	CacheWriteTokens int // cache-write prompt tokens, billed at the cache-write rate
 }
 
 // Validate reports whether the usage is internally consistent. Negative counts
@@ -60,9 +67,11 @@ func (u Usage) Validate() error {
 		return fmt.Errorf("cost: negative output tokens (%d)", u.OutputTokens)
 	case u.CachedTokens < 0:
 		return fmt.Errorf("cost: negative cached tokens (%d)", u.CachedTokens)
-	case u.CachedTokens > u.InputTokens:
-		return fmt.Errorf("cost: cached tokens (%d) exceed input tokens (%d)",
-			u.CachedTokens, u.InputTokens)
+	case u.CacheWriteTokens < 0:
+		return fmt.Errorf("cost: negative cache-write tokens (%d)", u.CacheWriteTokens)
+	case u.CachedTokens+u.CacheWriteTokens > u.InputTokens:
+		return fmt.Errorf("cost: cached (%d) + cache-write (%d) tokens exceed input tokens (%d)",
+			u.CachedTokens, u.CacheWriteTokens, u.InputTokens)
 	}
 	return nil
 }
@@ -73,31 +82,37 @@ func (u Usage) Validate() error {
 type Breakdown struct {
 	// InputUSD is the cost of the non-cached prompt tokens.
 	InputUSD float64
-	// CachedUSD is the cost of the cached prompt tokens.
+	// CachedUSD is the cost of the cached-read prompt tokens.
 	CachedUSD float64
+	// CacheWriteUSD is the cost of the cache-write prompt tokens.
+	CacheWriteUSD float64
 	// OutputUSD is the cost of the completion tokens.
 	OutputUSD float64
 }
 
-// Total is the full call cost: the three components summed.
-func (b Breakdown) Total() float64 { return b.InputUSD + b.CachedUSD + b.OutputUSD }
+// Total is the full call cost: the four components summed.
+func (b Breakdown) Total() float64 {
+	return b.InputUSD + b.CachedUSD + b.CacheWriteUSD + b.OutputUSD
+}
 
-// PromptUSD is the cost attributable to the prompt (input + cached) — the part
-// that scales with context growth.
-func (b Breakdown) PromptUSD() float64 { return b.InputUSD + b.CachedUSD }
+// PromptUSD is the cost attributable to the prompt (input + cached + cache
+// write) — the part that scales with context growth.
+func (b Breakdown) PromptUSD() float64 { return b.InputUSD + b.CachedUSD + b.CacheWriteUSD }
 
 // Breakdown returns the per-component cost of a single call priced at p. The
-// cached portion of the prompt is billed at CachedInput, the remainder at
-// Input, and completion tokens at Output. It errors if the usage is invalid.
+// cached-read portion of the prompt is billed at CachedInput, the cache-write
+// portion at CacheWrite, the remainder at Input, and completion tokens at
+// Output. It errors if the usage is invalid.
 func (p ModelPrice) Breakdown(u Usage) (Breakdown, error) {
 	if err := u.Validate(); err != nil {
 		return Breakdown{}, err
 	}
-	fullInput := u.InputTokens - u.CachedTokens
+	fullInput := u.InputTokens - u.CachedTokens - u.CacheWriteTokens
 	return Breakdown{
-		InputUSD:  float64(fullInput) / tokensPerMtok * p.Input,
-		CachedUSD: float64(u.CachedTokens) / tokensPerMtok * p.CachedInput,
-		OutputUSD: float64(u.OutputTokens) / tokensPerMtok * p.Output,
+		InputUSD:      float64(fullInput) / tokensPerMtok * p.Input,
+		CachedUSD:     float64(u.CachedTokens) / tokensPerMtok * p.CachedInput,
+		CacheWriteUSD: float64(u.CacheWriteTokens) / tokensPerMtok * p.CacheWrite,
+		OutputUSD:     float64(u.OutputTokens) / tokensPerMtok * p.Output,
 	}, nil
 }
 

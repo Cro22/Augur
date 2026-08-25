@@ -29,6 +29,12 @@ func (r Result) WriteTable(w io.Writer) error {
 			s.CostPerRun.Mean, s.CostPerRun.P50, s.CostPerRun.P95, s.CostPerRun.Stdev, s.CostPerRun.Min, s.CostPerRun.Max)
 		fmt.Fprintf(tw, "  calls/run\t%.2f\t%.2f\t%.2f\t%.2f\t%.0f\t%.0f\n",
 			s.CallsPerRun.Mean, s.CallsPerRun.P50, s.CallsPerRun.P95, s.CallsPerRun.Stdev, s.CallsPerRun.Min, s.CallsPerRun.Max)
+		// Only surface retries when any were observed — keeps the common
+		// no-retry trace's table uncluttered.
+		if s.RetriesPerRun.Max > 0 {
+			fmt.Fprintf(tw, "  retries/run\t%.2f\t%.2f\t%.2f\t%.2f\t%.0f\t%.0f\n",
+				s.RetriesPerRun.Mean, s.RetriesPerRun.P50, s.RetriesPerRun.P95, s.RetriesPerRun.Stdev, s.RetriesPerRun.Min, s.RetriesPerRun.Max)
+		}
 		if err := tw.Flush(); err != nil {
 			return err
 		}

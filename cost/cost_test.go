@@ -162,3 +162,58 @@ func TestPricePresence(t *testing.T) {
 		t.Error("Price(nope) ok = true, want false")
 	}
 }
+
+// haiku mirrors the Anthropic snapshot: $1.00 input / $5.00 output /
+// $0.10 cached-read / $1.25 cache-write per Mtok.
+var haiku = ModelPrice{Input: 1.00, Output: 5.00, CachedInput: 0.10, CacheWrite: 1.25}
+
+func TestCacheWriteBilling(t *testing.T) {
+	// Hand calc for an Anthropic call with all three input buckets:
+	//   full input  = 1M - 300k read - 200k write = 500k @ $1.00  = 0.50
+	//   cache read  = 300k @ $0.10                                = 0.03
+	//   cache write = 200k @ $1.25                                = 0.25
+	//   output      = 100k @ $5.00                                = 0.50
+	//   total                                                     = 1.28
+	u := Usage{InputTokens: 1_000_000, OutputTokens: 100_000, CachedTokens: 300_000, CacheWriteTokens: 200_000}
+	b, err := haiku.Breakdown(u)
+	if err != nil {
+		t.Fatalf("Breakdown: %v", err)
+	}
+	if !approxEqual(b.InputUSD, 0.50) || !approxEqual(b.CachedUSD, 0.03) ||
+		!approxEqual(b.CacheWriteUSD, 0.25) || !approxEqual(b.OutputUSD, 0.50) {
+		t.Errorf("breakdown = %+v, want in=0.50 cached=0.03 write=0.25 out=0.50", b)
+	}
+	if !approxEqual(b.Total(), 1.28) {
+		t.Errorf("Total = %v, want 1.28", b.Total())
+	}
+	// Cache-write tokens are part of the prompt, so context growth scales them.
+	if !approxEqual(b.PromptUSD(), 0.78) {
+		t.Errorf("PromptUSD = %v, want 0.78 (0.50+0.03+0.25)", b.PromptUSD())
+	}
+}
+
+func TestCacheWriteValidation(t *testing.T) {
+	// cached + write may not exceed the total input.
+	u := Usage{InputTokens: 100, CachedTokens: 60, CacheWriteTokens: 60}
+	if err := u.Validate(); err == nil {
+		t.Error("expected error when cached+write exceed input, got nil")
+	}
+	// A negative write bucket is nonsensical.
+	if err := (Usage{InputTokens: 100, CacheWriteTokens: -1}).Validate(); err == nil {
+		t.Error("expected error for negative cache-write tokens, got nil")
+	}
+}
+
+func TestCacheWriteDefaultsToInputRate(t *testing.T) {
+	// When cache_write is omitted, LoadPricing sets it to Input, so a model with
+	// no write premium bills cache-write tokens at the plain input rate.
+	yml := []byte("version: 1\nunit: per_mtok\nmodels:\n  m:\n    input: 2.0\n    output: 4.0\n")
+	p, err := ParsePricing(yml)
+	if err != nil {
+		t.Fatalf("ParsePricing: %v", err)
+	}
+	mp, _ := p.Price("m")
+	if mp.CacheWrite != 2.0 {
+		t.Errorf("CacheWrite defaulted to %v, want 2.0 (the input rate)", mp.CacheWrite)
+	}
+}

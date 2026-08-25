@@ -10,6 +10,10 @@
 #   cached_input  USD/Mtok for prompt tokens served from the provider's cache
 #                 (a discounted subset of input). Omit if the model has no
 #                 cache discount — Augur then bills cached tokens at `input`.
+#   cache_write   USD/Mtok for prompt tokens WRITTEN to the provider's cache
+#                 (Anthropic's cache_creation_input_tokens, ~1.25x input). Omit
+#                 for providers that don't bill writes separately (OpenAI,
+#                 Gemini) — Augur then bills them at `input`.
 
 version: 1
 snapshot_date: "2026-06-21"
@@ -31,16 +35,19 @@ models:
     output: 4.40
     cached_input: 0.55
 
-  # --- Anthropic ---
+  # --- Anthropic --- (cache_write ≈ 1.25× input; cached_input is 5-min read rate)
   claude-opus-4-8:
     input: 15.00
     output: 75.00
     cached_input: 1.50
+    cache_write: 18.75
   claude-sonnet-4-6:
     input: 3.00
     output: 15.00
     cached_input: 0.30
+    cache_write: 3.75
   claude-haiku-4-5:
     input: 1.00
     output: 5.00
     cached_input: 0.10
+    cache_write: 1.25

@@ -132,6 +132,7 @@ func TestProxyRecordsUsage(t *testing.T) {
 		LatencyMs:    0, // fixed clock → zero elapsed
 		Endpoint:     "/v1/chat/completions",
 		Status:       200,
+		Kind:         trace.KindInitial,
 	}
 	if got != want {
 		t.Errorf("trace row mismatch:\n got %+v\nwant %+v", got, want)
@@ -267,7 +268,7 @@ func TestUsageFromResponse(t *testing.T) {
 
 	// Garbage / no usage → zero, no panic.
 	z, m := usageFromResponse([]byte(`not json`))
-	if z != (oaiUsage{}) || m != "" {
+	if z != (tokenUsage{}) || m != "" {
 		t.Errorf("garbage body = (%+v, %q), want zero", z, m)
 	}
 }

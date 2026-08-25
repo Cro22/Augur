@@ -12,22 +12,26 @@ import (
 // within a scenario — the "decompose by model" view that shows which model
 // drives a scenario's bill.
 type ModelUsage struct {
-	Model        string  `json:"model"`
-	Calls        int     `json:"calls"`
-	InputTokens  int     `json:"input_tokens"`
-	OutputTokens int     `json:"output_tokens"`
-	CachedTokens int     `json:"cached_tokens"`
-	CostUSD      float64 `json:"cost_usd"`
+	Model            string  `json:"model"`
+	Calls            int     `json:"calls"`
+	InputTokens      int     `json:"input_tokens"`
+	OutputTokens     int     `json:"output_tokens"`
+	CachedTokens     int     `json:"cached_tokens"`
+	CacheWriteTokens int     `json:"cache_write_tokens,omitempty"`
+	CostUSD          float64 `json:"cost_usd"`
 }
 
 // Run is the cost of a single (scenario, run): the sum over every LLM call the
 // agent made during that one execution. Kept individually so the checkpoint can
 // reconcile per-run totals against the raw trace by hand.
 type Run struct {
-	ScenarioID string  `json:"scenario_id"`
-	RunID      string  `json:"run_id"`
-	Calls      int     `json:"calls"`
-	CostUSD    float64 `json:"cost_usd"`
+	ScenarioID string `json:"scenario_id"`
+	RunID      string `json:"run_id"`
+	Calls      int    `json:"calls"`
+	// Retries is how many of this run's calls repeated an earlier call's request
+	// body (trace.KindRetry) — the observed retry count for the run.
+	Retries int     `json:"retries"`
+	CostUSD float64 `json:"cost_usd"`
 }
 
 // Scenario aggregates all runs of one scenario into the cost distribution and
@@ -39,10 +43,14 @@ type Scenario struct {
 	// projection engine and the gate ultimately care about.
 	CostPerRun Distribution `json:"cost_per_run_usd"`
 	// CallsPerRun is the distribution of how many LLM calls one run made — the
-	// primary OBSERVED agentic multiplier. Retry/fan-out classification needs
-	// labeling the trace does not yet carry; calls-per-run is what we can state
-	// truthfully from the data.
+	// primary OBSERVED agentic multiplier.
 	CallsPerRun Distribution `json:"calls_per_run"`
+	// RetriesPerRun is the distribution of how many of a run's calls were
+	// retries (trace.KindRetry: a request body identical to an earlier call in
+	// the same run). It splits the calls-per-run multiplier into the part driven
+	// by client-library retries versus genuinely new calls. Fan-out is not
+	// isolated — the proxy cannot observe call concurrency.
+	RetriesPerRun Distribution `json:"retries_per_run"`
 	// ByModel is the per-model breakdown, sorted by cost descending.
 	ByModel []ModelUsage `json:"by_model"`
 	// TotalCost is the summed cost of every run of this scenario.
@@ -127,9 +135,10 @@ func AggregateWithKnobs(records []trace.Record, pricing cost.Pricing, knobs Knob
 
 	for _, rec := range records {
 		u := cost.Usage{
-			InputTokens:  rec.InputTokens,
-			OutputTokens: rec.OutputTokens,
-			CachedTokens: rec.CachedTokens,
+			InputTokens:      rec.InputTokens,
+			OutputTokens:     rec.OutputTokens,
+			CachedTokens:     rec.CachedTokens,
+			CacheWriteTokens: rec.CacheWriteTokens,
 		}
 		b, err := pricing.Breakdown(rec.Model, u)
 		if err != nil {
@@ -146,6 +155,9 @@ func AggregateWithKnobs(records []trace.Record, pricing cost.Pricing, knobs Knob
 			runOrder = append(runOrder, k)
 		}
 		r.Calls++
+		if rec.Kind == trace.KindRetry {
+			r.Retries++
+		}
 		r.CostUSD += c
 
 		models := scenarioModels[rec.ScenarioID]
@@ -162,6 +174,7 @@ func AggregateWithKnobs(records []trace.Record, pricing cost.Pricing, knobs Knob
 		mu.InputTokens += rec.InputTokens
 		mu.OutputTokens += rec.OutputTokens
 		mu.CachedTokens += rec.CachedTokens
+		mu.CacheWriteTokens += rec.CacheWriteTokens
 		mu.CostUSD += c
 	}
 
@@ -176,19 +189,22 @@ func AggregateWithKnobs(records []trace.Record, pricing cost.Pricing, knobs Knob
 	for id, rs := range scenarioRuns {
 		costs := make([]float64, len(rs))
 		calls := make([]float64, len(rs))
+		retries := make([]float64, len(rs))
 		var total float64
 		for i, r := range rs {
 			costs[i] = r.CostUSD
 			calls[i] = float64(r.Calls)
+			retries[i] = float64(r.Retries)
 			total += r.CostUSD
 		}
 		scenarios = append(scenarios, Scenario{
-			ScenarioID:  id,
-			Runs:        len(rs),
-			CostPerRun:  Summarize(costs),
-			CallsPerRun: Summarize(calls),
-			ByModel:     sortedModels(scenarioModels[id]),
-			TotalCost:   total,
+			ScenarioID:    id,
+			Runs:          len(rs),
+			CostPerRun:    Summarize(costs),
+			CallsPerRun:   Summarize(calls),
+			RetriesPerRun: Summarize(retries),
+			ByModel:       sortedModels(scenarioModels[id]),
+			TotalCost:     total,
 		})
 	}
 	sort.Slice(scenarios, func(i, j int) bool {
