@@ -36,6 +36,7 @@ func runRun(args []string) error {
 	continueOnError := fs.Bool("continue-on-error", false, "keep going after an agent invocation fails")
 	record := fs.String("record", "", "record every response to this cassette file (real provider calls)")
 	replay := fs.String("replay", "", "replay responses from this cassette file (no provider calls, no tokens)")
+	injectUsage := fs.Bool("inject-usage", true, "auto-set stream_options.include_usage on OpenAI streaming requests so usage is captured exactly")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -66,6 +67,7 @@ func runRun(args []string) error {
 	defer tracer.Close()
 
 	pxy := proxy.New(up, tracer, nil)
+	pxy.InjectUsage = *injectUsage
 	cass, err := configureCassette(pxy, *record, *replay)
 	if err != nil {
 		return err

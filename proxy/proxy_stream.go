@@ -24,18 +24,19 @@ func isEventStreamCT(ct string) bool {
 // response body, handling both a single JSON object and a full SSE stream. The
 // buffered and replay paths use it so a recorded streaming response is costed
 // the same as it was live.
-func extractUsage(contentType string, body []byte) (oaiUsage, string) {
+func extractUsage(contentType string, body []byte) (tokenUsage, string) {
 	if isEventStreamCT(contentType) {
 		return usageFromSSE(body)
 	}
 	return usageFromResponse(body)
 }
 
-// usageFromSSE scans a buffered SSE body line-by-line for the usage block and
-// the resolved model, mirroring what streamResponse captures while relaying.
-func usageFromSSE(body []byte) (oaiUsage, string) {
+// usageFromSSE scans a buffered SSE body line-by-line, merging every chunk's
+// usage (see tokenUsage.merge) and tracking the resolved model, mirroring what
+// streamResponse captures while relaying.
+func usageFromSSE(body []byte) (tokenUsage, string) {
 	var (
-		usage oaiUsage
+		usage tokenUsage
 		model string
 	)
 	for line := range bytes.SplitSeq(body, []byte("\n")) {
@@ -44,7 +45,7 @@ func usageFromSSE(body []byte) (oaiUsage, string) {
 				model = m
 			}
 			if has {
-				usage = u
+				usage.merge(u)
 			}
 		}
 	}
@@ -59,7 +60,7 @@ func usageFromSSE(body []byte) (oaiUsage, string) {
 //
 // Relaying is byte-exact: each line is read with its delimiter intact and
 // written straight back, so the client sees precisely the provider's stream.
-func (s *Server) streamResponse(w http.ResponseWriter, resp *http.Response) (oaiUsage, string) {
+func (s *Server) streamResponse(w http.ResponseWriter, resp *http.Response) (tokenUsage, string) {
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
@@ -67,7 +68,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, resp *http.Response) (oai
 	_ = rc.Flush() // flush headers so the client opens the stream immediately
 
 	var (
-		usage oaiUsage
+		usage tokenUsage
 		model string
 	)
 	br := bufio.NewReader(resp.Body)
@@ -83,7 +84,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, resp *http.Response) (oai
 					model = m
 				}
 				if has {
-					usage = u
+					usage.merge(u)
 				}
 			}
 		}
@@ -107,14 +108,14 @@ var doneMarker = []byte("[DONE]")
 // parseSSEChunk pulls usage/model out of a single SSE line. Non-data lines,
 // comments, the [DONE] marker, and chunks without a usage block return
 // hasUsage=false (model may still be set).
-func parseSSEChunk(line []byte) (u oaiUsage, hasUsage bool, model string) {
+func parseSSEChunk(line []byte) (u tokenUsage, hasUsage bool, model string) {
 	t := bytes.TrimSpace(line)
 	if !bytes.HasPrefix(t, dataPrefix) {
-		return oaiUsage{}, false, ""
+		return tokenUsage{}, false, ""
 	}
 	payload := bytes.TrimSpace(t[len(dataPrefix):])
 	if len(payload) == 0 || bytes.Equal(payload, doneMarker) {
-		return oaiUsage{}, false, ""
+		return tokenUsage{}, false, ""
 	}
 	return parseUsageJSON(payload)
 }

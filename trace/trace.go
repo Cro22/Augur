@@ -44,11 +44,15 @@ type Record struct {
 	// model named in the request (it matches pricing.yaml keys), falling back
 	// to the model echoed in the response.
 	Model string `json:"model"`
-	// Token accounting, mirroring the provider's report. CachedTokens is the
-	// cached SUBSET of InputTokens, not an additional bucket (see package cost).
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	CachedTokens int `json:"cached_tokens"`
+	// Token accounting, mirroring the provider's report. CachedTokens and
+	// CacheWriteTokens are cached-read and cache-write SUBSETS of InputTokens,
+	// not additional buckets (see package cost). CacheWriteTokens is Anthropic's
+	// cache_creation_input_tokens, billed at a premium over the base input rate;
+	// OpenAI/Gemini leave it zero (their cache writes are not separately billed).
+	InputTokens      int `json:"input_tokens"`
+	OutputTokens     int `json:"output_tokens"`
+	CachedTokens     int `json:"cached_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 	// LatencyMs is the wall-clock time the upstream provider took to respond.
 	LatencyMs int64 `json:"latency_ms"`
 	// Endpoint is the request path (e.g. /v1/chat/completions), kept so a trace
@@ -59,7 +63,25 @@ type Record struct {
 	// hunts for, and a row with zero tokens still records that an attempt was
 	// made.
 	Status int `json:"status,omitempty"`
+	// Kind classifies the call within its run using only what the proxy can
+	// observe truthfully: KindRetry marks a call whose request body is byte-
+	// identical to an earlier call in the same (scenario, run) — the shape a
+	// client library's retry takes — versus KindInitial for the first time a
+	// given request is seen. It is empty on traces written before this field
+	// existed. Fan-out vs sequential tool-loop steps are NOT distinguished here
+	// (both are KindInitial): the proxy cannot see call concurrency.
+	Kind string `json:"kind,omitempty"`
 }
+
+// Call-kind values for Record.Kind. See the Kind field for the classification
+// rule and its deliberate limits.
+const (
+	// KindInitial is the first time a given request body is seen in a run.
+	KindInitial = "initial"
+	// KindRetry is a call whose request body repeats an earlier one in the same
+	// run — the observable signature of a client-library retry.
+	KindRetry = "retry"
+)
 
 // Writer appends Records to an io.Writer as JSON Lines. It is safe for
 // concurrent use: the proxy serves requests in parallel, so Write is guarded by
