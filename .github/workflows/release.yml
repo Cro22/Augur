@@ -1,0 +1,36 @@
+name: Release
+
+# Cut a release by pushing a semver tag, e.g.:
+#   git tag v1.2.0 && git push origin v1.2.0
+# GoReleaser then cross-compiles augur and uploads the binaries + checksums to
+# the GitHub release, which action.yml downloads instead of building from source.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # required to create the release and upload assets
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # GoReleaser needs full history for the changelog
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Run tests before releasing
+        run: go test ./... -count=1
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

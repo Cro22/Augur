@@ -266,16 +266,28 @@ jobs:
       pull-requests: write   # to post the report comment
     steps:
       - uses: actions/checkout@v4
-      - uses: Cro22/augur@v1
+      - uses: Cro22/augur@v1.1.0   # pin a release tag → prebuilt binary
         with:
           cassette: cassette.jsonl   # replay → zero tokens
           traffic: traffic.yaml
           budget: budget.yaml
 ```
 
+**No Go toolchain required.** When you pin the action to a release tag
+(`@v1.1.0`), it downloads the matching prebuilt binary from the release and
+checksum-verifies it — so a Python/TS/Node agent repo runs the gate without a Go
+build. Pin to a branch or SHA (`@master`) and it transparently falls back to
+building from source; force either mode with the `version` input (`source`, or a
+specific tag). Binaries are produced by [GoReleaser](.goreleaser.yaml) on every
+`v*` tag ([release workflow](.github/workflows/release.yml)).
+
 See [`action.yml`](action.yml) for all inputs and
 [`examples/github-workflow.yml`](examples/github-workflow.yml) for a fuller
 example.
+
+**Cutting a release** (maintainers): `git tag v1.2.0 && git push origin v1.2.0`
+triggers GoReleaser to cross-compile (linux/darwin/windows × amd64/arm64) and
+attach the binaries + `checksums.txt` to the GitHub release.
 
 ---
 

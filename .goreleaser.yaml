@@ -1,0 +1,74 @@
+# GoReleaser builds Augur for every platform CI agents run on and publishes the
+# binaries (plus a checksums file) to the GitHub release for each `v*` tag. The
+# GitHub Action (action.yml) then downloads the matching prebuilt binary instead
+# of compiling from source, so agent repos written in Python/TS/Node don't need
+# a Go toolchain in CI.
+#
+# Validate locally with `goreleaser check`; it runs in CI on every push.
+version: 2
+
+project_name: augur
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: augur
+    main: .
+    binary: augur
+    env:
+      - CGO_ENABLED=0 # a static binary needs no libc on the runner
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Inject build metadata so `augur version` reports the release (see
+    # version_cmd.go). -s -w strip the symbol table to shrink the binary.
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: augur
+    ids:
+      - augur
+    # Stable, version-free archive names: the release tag is already in the
+    # download URL path, so the Action can predict the asset name from just the
+    # runner's os/arch (see action.yml).
+    name_template: "augur_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+release:
+  github:
+    owner: Cro22
+    name: Augur
+  draft: false
+  prerelease: auto
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "Merge pull request"
+      - "Merge branch"
