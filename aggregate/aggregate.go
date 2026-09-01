@@ -67,6 +67,12 @@ type Result struct {
 	// Runs lists every run (sorted by scenario then run id) for hand
 	// reconciliation against the raw trace.
 	Runs []Run `json:"runs"`
+	// ModelAliases records every model in the trace that was priced via the
+	// pricing snapshot's prefix fallback (Pricing.PrefixFallback), mapping the
+	// requested model to the snapshot key it was billed against. It is empty when
+	// no normalization happened (the default). Callers surface it as a warning so
+	// a fallback is never silent.
+	ModelAliases map[string]string `json:"model_aliases,omitempty"`
 }
 
 // Knobs are what-if multipliers applied to every call's cost, for sensitivity
@@ -132,6 +138,8 @@ func AggregateWithKnobs(records []trace.Record, pricing cost.Pricing, knobs Knob
 	var runOrder []runKey
 	// scenario -> model -> accumulating usage
 	scenarioModels := make(map[string]map[string]*ModelUsage)
+	// requested model -> canonical snapshot key, for models priced via fallback.
+	var aliases map[string]string
 
 	for _, rec := range records {
 		u := cost.Usage{
@@ -140,7 +148,18 @@ func AggregateWithKnobs(records []trace.Record, pricing cost.Pricing, knobs Knob
 			CachedTokens:     rec.CachedTokens,
 			CacheWriteTokens: rec.CacheWriteTokens,
 		}
-		b, err := pricing.Breakdown(rec.Model, u)
+		canonical, mp, ok := pricing.Resolve(rec.Model)
+		if !ok {
+			return Result{}, fmt.Errorf("aggregate: scenario %q run %q seq %d: %w: %q",
+				rec.ScenarioID, rec.RunID, rec.Seq, cost.ErrUnknownModel, rec.Model)
+		}
+		if canonical != rec.Model {
+			if aliases == nil {
+				aliases = make(map[string]string)
+			}
+			aliases[rec.Model] = canonical
+		}
+		b, err := mp.Breakdown(u)
 		if err != nil {
 			return Result{}, fmt.Errorf("aggregate: scenario %q run %q seq %d: %w",
 				rec.ScenarioID, rec.RunID, rec.Seq, err)
@@ -226,6 +245,7 @@ func AggregateWithKnobs(records []trace.Record, pricing cost.Pricing, knobs Knob
 		SnapshotDate: pricing.SnapshotDate,
 		Scenarios:    scenarios,
 		Runs:         allRuns,
+		ModelAliases: aliases,
 	}, nil
 }
 

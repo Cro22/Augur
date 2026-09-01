@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 )
 
 // Environment-variable names the runner injects per invocation. See the package
@@ -52,6 +54,14 @@ type Options struct {
 	// ContinueOnError keeps running after an invocation fails instead of
 	// aborting at the first failure.
 	ContinueOnError bool
+	// Concurrency is how many invocations run in parallel. Values <= 1 (the
+	// default) preserve the original strictly-sequential behavior, streaming each
+	// invocation's output directly. With >1, invocations run through a worker pool
+	// and each one's stdout/stderr is buffered and flushed as a block so parallel
+	// output never interleaves. The proxy and trace writer are concurrency-safe,
+	// so parallel invocations record correctly; the Summary is always assembled
+	// in scenario/run order regardless of completion order.
+	Concurrency int
 
 	Stdout io.Writer
 	Stderr io.Writer
@@ -99,32 +109,156 @@ func Run(ctx context.Context, cfg Config, opts Options) (Summary, error) {
 		stderr = os.Stderr
 	}
 
-	var sum Summary
+	// Flatten scenarios × repetitions into an ordered task list. The Summary is
+	// always assembled in this order, so parallel completion order never changes
+	// the output.
+	var tasks []task
 	for _, sc := range cfg.Scenarios {
 		for i := range runs {
-			if err := ctx.Err(); err != nil {
-				return sum, err
-			}
+			tasks = append(tasks, task{sc: sc, index: i})
+		}
+	}
 
-			runID := makeRunID(opts.Session, sc.ID, i)
-			env := buildEnv(baseEnv, sc, runID, opts.BaseURL)
-			args := substituteInput(cfg.Command, sc.Input)
+	concurrency := max(opts.Concurrency, 1)
 
-			err := execFn(ctx, args, env, stdout, stderr)
-			sum.Total++
-			if err != nil {
-				sum.Failed++
-				err = fmt.Errorf("scenario %q run %q (index %d): %w", sc.ID, runID, i, err)
-			}
-			sum.Invocations = append(sum.Invocations, Invocation{
-				ScenarioID: sc.ID, RunID: runID, Index: i, Err: err,
-			})
-			if err != nil && !opts.ContinueOnError {
-				return sum, err
-			}
+	r := invoker{
+		cfg: cfg, opts: opts, baseEnv: baseEnv,
+		execFn: execFn, stdout: stdout, stderr: stderr,
+	}
+	if concurrency == 1 {
+		return r.runSequential(ctx, tasks)
+	}
+	return r.runParallel(ctx, tasks, concurrency)
+}
+
+// task is one scheduled invocation: a scenario and which repetition (index) of
+// it to run.
+type task struct {
+	sc    Scenario
+	index int
+}
+
+// invoker holds the resolved per-Run configuration so the sequential and
+// parallel paths share one place that builds each invocation.
+type invoker struct {
+	cfg     Config
+	opts    Options
+	baseEnv []string
+	execFn  ExecFunc
+	stdout  io.Writer
+	stderr  io.Writer
+}
+
+// invoke runs one task, writing the agent's output to the given writers, and
+// returns the Invocation (with any exec error already wrapped).
+func (r invoker) invoke(ctx context.Context, t task, stdout, stderr io.Writer) Invocation {
+	runID := makeRunID(r.opts.Session, t.sc.ID, t.index)
+	env := buildEnv(r.baseEnv, t.sc, runID, r.opts.BaseURL)
+	args := substituteInput(r.cfg.Command, t.sc.Input)
+
+	err := r.execFn(ctx, args, env, stdout, stderr)
+	if err != nil {
+		err = fmt.Errorf("scenario %q run %q (index %d): %w", t.sc.ID, runID, t.index, err)
+	}
+	return Invocation{ScenarioID: t.sc.ID, RunID: runID, Index: t.index, Err: err}
+}
+
+// runSequential executes tasks one at a time, streaming each invocation's output
+// directly. This is the original behavior and the default (Concurrency <= 1):
+// unless ContinueOnError is set, the first failing invocation aborts the run.
+func (r invoker) runSequential(ctx context.Context, tasks []task) (Summary, error) {
+	var sum Summary
+	for _, t := range tasks {
+		if err := ctx.Err(); err != nil {
+			return sum, err
+		}
+		inv := r.invoke(ctx, t, r.stdout, r.stderr)
+		sum.Total++
+		if inv.Err != nil {
+			sum.Failed++
+		}
+		sum.Invocations = append(sum.Invocations, inv)
+		if inv.Err != nil && !r.opts.ContinueOnError {
+			return sum, inv.Err
 		}
 	}
 	return sum, nil
+}
+
+// runParallel executes up to `concurrency` tasks at once. Each invocation's
+// stdout/stderr is buffered and flushed as a single block under a mutex, so
+// parallel output never interleaves. Without ContinueOnError, the first genuine
+// failure cancels the run's context: in-flight invocations are signalled to
+// stop and no further tasks are launched, and that triggering error is returned.
+func (r invoker) runParallel(ctx context.Context, tasks []task, concurrency int) (Summary, error) {
+	results := make([]Invocation, len(tasks))
+	ran := make([]bool, len(tasks))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	var flushMu sync.Mutex // serializes output flushes
+	var errOnce sync.Once
+	var triggerErr error // the failure that aborted the run (if any)
+
+	for idx, t := range tasks {
+		if runCtx.Err() != nil {
+			break // aborted or cancelled: stop launching new work
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int, t task) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			var ob, eb bytes.Buffer
+			inv := r.invoke(runCtx, t, &ob, &eb)
+
+			flushMu.Lock()
+			_, _ = io.Copy(r.stdout, &ob)
+			_, _ = io.Copy(r.stderr, &eb)
+			flushMu.Unlock()
+
+			// Distinct index per goroutine: writes to different slice elements
+			// don't race, and the wg.Wait below establishes the read barrier.
+			results[idx] = inv
+			ran[idx] = true
+			if inv.Err != nil && !r.opts.ContinueOnError {
+				errOnce.Do(func() { triggerErr = inv.Err })
+				cancel()
+			}
+		}(idx, t)
+	}
+	wg.Wait()
+
+	sum := summarize(tasks, results, ran)
+	if triggerErr != nil {
+		return sum, triggerErr
+	}
+	if err := ctx.Err(); err != nil {
+		return sum, err
+	}
+	return sum, nil
+}
+
+// summarize assembles the Summary in task order from the parallel results,
+// including only invocations that actually ran.
+func summarize(tasks []task, results []Invocation, ran []bool) Summary {
+	var sum Summary
+	for idx := range tasks {
+		if !ran[idx] {
+			continue
+		}
+		inv := results[idx]
+		sum.Total++
+		if inv.Err != nil {
+			sum.Failed++
+		}
+		sum.Invocations = append(sum.Invocations, inv)
+	}
+	return sum
 }
 
 // makeRunID builds a per-invocation run id. With a session it is

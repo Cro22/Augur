@@ -145,6 +145,26 @@ augur gate --traffic traffic.yaml --budget budget.yaml
 
 `augur gate` is the one you wire into CI.
 
+### Tuning for CI
+
+- **Parallel scenarios.** `augur run --concurrency N` (alias `-j N`) runs up to N
+  agent invocations at once. With ~20 repetitions over network-bound LLM calls
+  this cuts wall-clock time sharply; the proxy and trace ledger are
+  concurrency-safe, and each invocation's stdout/stderr is flushed as one block
+  so parallel output never interleaves. Defaults to `1` (sequential).
+- **Per-call timeout.** `augur run --timeout 5m` / `augur proxy --timeout 5m`
+  bounds how long the proxy waits on the provider (default 10m). A single call
+  can override it with the `X-Augur-Timeout` header (a Go duration such as
+  `300s`) — handy for slow reasoning models (o1/o3/r1). The deadline is a context
+  deadline, so a client that disconnects cancels the upstream call immediately
+  (no orphaned tokens). `--timeout 0` disables the proxy-imposed deadline.
+- **Model-alias fallback.** `augur aggregate --normalize-models` /
+  `augur gate --normalize-models` prices a model that is absent from the snapshot
+  via its longest dash-delimited prefix (e.g. `gpt-4o-2024-08-06` → `gpt-4o`), so
+  a provider bumping a dated suffix doesn't fail the build with
+  `unknown model`. It is **opt-in** and prints a warning naming every model it
+  normalized, because a silent fallback can mis-bill.
+
 ### Record once, replay for free
 
 Running the agent against the real provider on every CI push spends real tokens.
