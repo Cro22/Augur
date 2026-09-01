@@ -145,6 +145,26 @@ augur gate --traffic traffic.yaml --budget budget.yaml
 
 `augur gate` is the one you wire into CI.
 
+### Tuning for CI
+
+- **Parallel scenarios.** `augur run --concurrency N` (alias `-j N`) runs up to N
+  agent invocations at once. With ~20 repetitions over network-bound LLM calls
+  this cuts wall-clock time sharply; the proxy and trace ledger are
+  concurrency-safe, and each invocation's stdout/stderr is flushed as one block
+  so parallel output never interleaves. Defaults to `1` (sequential).
+- **Per-call timeout.** `augur run --timeout 5m` / `augur proxy --timeout 5m`
+  bounds how long the proxy waits on the provider (default 10m). A single call
+  can override it with the `X-Augur-Timeout` header (a Go duration such as
+  `300s`) — handy for slow reasoning models (o1/o3/r1). The deadline is a context
+  deadline, so a client that disconnects cancels the upstream call immediately
+  (no orphaned tokens). `--timeout 0` disables the proxy-imposed deadline.
+- **Model-alias fallback.** `augur aggregate --normalize-models` /
+  `augur gate --normalize-models` prices a model that is absent from the snapshot
+  via its longest dash-delimited prefix (e.g. `gpt-4o-2024-08-06` → `gpt-4o`), so
+  a provider bumping a dated suffix doesn't fail the build with
+  `unknown model`. It is **opt-in** and prints a warning naming every model it
+  normalized, because a silent fallback can mis-bill.
+
 ### Record once, replay for free
 
 Running the agent against the real provider on every CI push spends real tokens.
@@ -246,16 +266,28 @@ jobs:
       pull-requests: write   # to post the report comment
     steps:
       - uses: actions/checkout@v4
-      - uses: Cro22/augur@v1
+      - uses: Cro22/augur@v1.1.0   # pin a release tag → prebuilt binary
         with:
           cassette: cassette.jsonl   # replay → zero tokens
           traffic: traffic.yaml
           budget: budget.yaml
 ```
 
+**No Go toolchain required.** When you pin the action to a release tag
+(`@v1.1.0`), it downloads the matching prebuilt binary from the release and
+checksum-verifies it — so a Python/TS/Node agent repo runs the gate without a Go
+build. Pin to a branch or SHA (`@master`) and it transparently falls back to
+building from source; force either mode with the `version` input (`source`, or a
+specific tag). Binaries are produced by [GoReleaser](.goreleaser.yaml) on every
+`v*` tag ([release workflow](.github/workflows/release.yml)).
+
 See [`action.yml`](action.yml) for all inputs and
 [`examples/github-workflow.yml`](examples/github-workflow.yml) for a fuller
 example.
+
+**Cutting a release** (maintainers): `git tag v1.2.0 && git push origin v1.2.0`
+triggers GoReleaser to cross-compile (linux/darwin/windows × amd64/arm64) and
+attach the binaries + `checksums.txt` to the GitHub release.
 
 ---
 

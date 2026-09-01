@@ -41,10 +41,11 @@ var commands = map[string]command{
 	"project":   {runProject, "project a trace to production unit economics with CIs"},
 	"gate":      {runGate, "check a projection against budget.yaml (exit 1 if over)"},
 	"tco":       {runTCO, "show effective $/Mtok for self-hosted models (TCO)"},
+	"version":   {runVersion, "print the augur version"},
 }
 
 // order fixes the usage listing (maps don't iterate deterministically).
-var order = []string{"proxy", "run", "aggregate", "project", "gate", "tco"}
+var order = []string{"proxy", "run", "aggregate", "project", "gate", "tco", "version"}
 
 func main() {
 	if len(os.Args) < 2 {

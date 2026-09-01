@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"sort"
 
 	"augur/cost"
 	"augur/tco"
@@ -20,4 +22,22 @@ func resolvePricing(pricingPath, tcoPath string) (cost.Pricing, error) {
 		return tc.Pricing(fmt.Sprintf("tco (%s)", tcoPath)), nil
 	}
 	return cost.LoadPricing(pricingPath)
+}
+
+// warnModelAliases prints, to w, one warning per model that was priced via the
+// snapshot's prefix fallback (see aggregate.Result.ModelAliases). A fallback is
+// a convenience that can mis-bill if the base entry's price differs from the
+// requested variant's, so it is never silent. Keys are sorted for stable output.
+func warnModelAliases(w io.Writer, aliases map[string]string) {
+	if len(aliases) == 0 {
+		return
+	}
+	requested := make([]string, 0, len(aliases))
+	for r := range aliases {
+		requested = append(requested, r)
+	}
+	sort.Strings(requested)
+	for _, r := range requested {
+		fmt.Fprintf(w, "augur: WARNING model %q not in pricing snapshot; billed at %q via prefix fallback\n", r, aliases[r])
+	}
 }

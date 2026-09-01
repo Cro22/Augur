@@ -19,6 +19,7 @@ func runProxy(args []string) error {
 	upstream := fs.String("upstream", "https://api.openai.com", "base URL of the real provider (OpenAI-, Anthropic-, or Gemini-compatible)")
 	tracePath := fs.String("trace", "trace.jsonl", "path to append the cost trace to (JSONL)")
 	injectUsage := fs.Bool("inject-usage", true, "auto-set stream_options.include_usage on OpenAI streaming requests so usage is captured exactly")
+	timeout := fs.Duration("timeout", proxy.DefaultTimeout, "per-call upstream timeout; a request may override it with the X-Augur-Timeout header (0 = no proxy-imposed deadline)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -39,6 +40,7 @@ func runProxy(args []string) error {
 
 	srv := proxy.New(up, tracer, nil)
 	srv.InjectUsage = *injectUsage
+	srv.Timeout = *timeout
 
 	fmt.Printf("augur proxy: listening on %s → forwarding to %s, tracing to %s\n",
 		*listen, up.String(), *tracePath)

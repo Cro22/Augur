@@ -28,6 +28,7 @@ func runGate(args []string) error {
 	ciLevel := fs.Float64("ci", 0.95, "confidence level for bootstrap intervals (0..1)")
 	bootstrap := fs.Int("bootstrap", 2000, "number of bootstrap resamples")
 	seed := fs.Uint64("seed", 1, "PRNG seed for reproducible bootstrap intervals")
+	normalizeModels := fs.Bool("normalize-models", false, "price a model absent from the snapshot via its longest dash-delimited prefix (e.g. gpt-4o-2024-08-06 -> gpt-4o); warns per fallback")
 	knobFs := addKnobFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -42,6 +43,7 @@ func runGate(args []string) error {
 	if err != nil {
 		return err
 	}
+	pricing.PrefixFallback = *normalizeModels
 	traffic, err := project.LoadTraffic(*trafficPath)
 	if err != nil {
 		return err
@@ -55,6 +57,7 @@ func runGate(args []string) error {
 	if err != nil {
 		return err
 	}
+	warnModelAliases(os.Stderr, res.ModelAliases)
 	proj, err := project.Project(res, traffic, project.Options{
 		CILevel: *ciLevel, BootstrapSamples: *bootstrap, Seed: *seed,
 	})

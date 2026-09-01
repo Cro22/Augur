@@ -35,8 +35,11 @@ inputs:
   working-directory:
     description: "Directory the config files live in."
     default: "."
+  version:
+    description: "Which augur release to use. 'auto' downloads the prebuilt binary matching the tag you pinned the action to (e.g. @v1.2.0); a specific tag (v1.2.0) forces that release; 'source' always builds from source."
+    default: "auto"
   go-version:
-    description: "Go version used to build augur."
+    description: "Go version for the from-source fallback build (used when no prebuilt binary is available)."
     default: "1.25"
 
 outputs:
@@ -50,12 +53,95 @@ outputs:
 runs:
   using: "composite"
   steps:
+    # Prefer a prebuilt binary from the GitHub release so agent repos (Python/TS/
+    # Node) don't need a Go toolchain in CI. Falls back to a source build when no
+    # matching release asset exists (a branch/SHA pin, an unbuilt platform, or a
+    # download failure) — need-build drives the two steps that follow.
+    - name: Resolve augur binary
+      id: resolve
+      shell: bash
+      run: |
+        set -euo pipefail
+        want='${{ inputs.version }}'
+        ref='${{ github.action_ref }}'
+
+        # Decide which release tag to fetch (empty => build from source).
+        version=""
+        if [ "$want" = "source" ]; then
+          version=""
+        elif [ "$want" = "auto" ] || [ -z "$want" ]; then
+          case "$ref" in
+            v[0-9]*) version="$ref" ;;              # pinned to a release tag
+            *) version="" ;;                        # branch/SHA => no release asset
+          esac
+        else
+          version="$want"                           # explicit tag
+        fi
+
+        if [ -z "$version" ]; then
+          echo "augur: no prebuilt release for ref='$ref' (version input '$want'); building from source."
+          echo "need-build=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Map the runner to the os/arch naming GoReleaser used for the assets.
+        case "${RUNNER_OS}" in
+          Linux)   os=linux ;;
+          macOS)   os=darwin ;;
+          Windows) os=windows ;;
+          *) echo "augur: unsupported RUNNER_OS=$RUNNER_OS; building from source."; echo "need-build=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+        esac
+        case "${RUNNER_ARCH}" in
+          X64)   arch=amd64 ;;
+          ARM64) arch=arm64 ;;
+          *) echo "augur: unsupported RUNNER_ARCH=$RUNNER_ARCH; building from source."; echo "need-build=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+        esac
+
+        base="https://github.com/Cro22/Augur/releases/download/${version}"
+        archive="augur_${os}_${arch}.tar.gz"
+        dest="${RUNNER_TEMP}/augur-dl"
+        mkdir -p "$dest"
+
+        echo "augur: fetching ${archive} from release ${version}"
+        if ! curl -fsSL "${base}/${archive}" -o "${dest}/${archive}" \
+          || ! curl -fsSL "${base}/checksums.txt" -o "${dest}/checksums.txt"; then
+          echo "augur: prebuilt download failed; falling back to a source build."
+          echo "need-build=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Verify the checksum before trusting the binary. Extract the expected
+        # hash with awk (tolerating a leading '*' binary-mode marker) and compare
+        # to the computed one, so it works with either sha256sum or shasum and is
+        # insensitive to the one-/two-space separator variants.
+        cd "$dest"
+        want_sum="$(awk -v f="${archive}" '{ n=$2; sub(/^\*/,"",n); if (n==f) print $1 }' checksums.txt)"
+        if command -v sha256sum >/dev/null 2>&1; then
+          got_sum="$(sha256sum "${archive}" | awk '{print $1}')"
+        else
+          got_sum="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+        fi
+        if [ -z "$want_sum" ] || [ "$want_sum" != "$got_sum" ]; then
+          echo "::error::augur: checksum mismatch for ${archive} (expected '${want_sum}', got '${got_sum}')"
+          exit 1
+        fi
+        tar -xzf "${archive}"
+
+        bin="${dest}/augur"
+        [ -f "${dest}/augur.exe" ] && bin="${dest}/augur.exe"
+        chmod +x "$bin" 2>/dev/null || true
+        echo "AUGUR=${bin}" >> "$GITHUB_ENV"
+        echo "need-build=false" >> "$GITHUB_OUTPUT"
+        echo "augur: using prebuilt $("$bin" version | head -1)"
+
     - name: Set up Go
+      if: ${{ steps.resolve.outputs.need-build == 'true' }}
       uses: actions/setup-go@v5
       with:
         go-version: ${{ inputs.go-version }}
 
-    - name: Build augur
+    - name: Build augur (source fallback)
+      if: ${{ steps.resolve.outputs.need-build == 'true' }}
       shell: bash
       run: |
         cd "${{ github.action_path }}"

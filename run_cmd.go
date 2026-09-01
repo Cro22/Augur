@@ -37,8 +37,14 @@ func runRun(args []string) error {
 	record := fs.String("record", "", "record every response to this cassette file (real provider calls)")
 	replay := fs.String("replay", "", "replay responses from this cassette file (no provider calls, no tokens)")
 	injectUsage := fs.Bool("inject-usage", true, "auto-set stream_options.include_usage on OpenAI streaming requests so usage is captured exactly")
+	timeout := fs.Duration("timeout", proxy.DefaultTimeout, "per-call upstream timeout; an agent may override it per request with the X-Augur-Timeout header (0 = no proxy-imposed deadline)")
+	concurrency := fs.Int("concurrency", 1, "number of agent invocations to run in parallel (alias: -j)")
+	fs.IntVar(concurrency, "j", 1, "shorthand for -concurrency")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *concurrency < 1 {
+		return fmt.Errorf("-concurrency must be >= 1, got %d", *concurrency)
 	}
 	if *record != "" && *replay != "" {
 		return fmt.Errorf("-record and -replay are mutually exclusive")
@@ -68,6 +74,7 @@ func runRun(args []string) error {
 
 	pxy := proxy.New(up, tracer, nil)
 	pxy.InjectUsage = *injectUsage
+	pxy.Timeout = *timeout
 	cass, err := configureCassette(pxy, *record, *replay)
 	if err != nil {
 		return err
@@ -102,14 +109,15 @@ func runRun(args []string) error {
 	}
 
 	fmt.Printf("augur run: proxy on %s (%s), tracing to %s\n", baseURL, modeLabel(*record, *replay, up), *tracePath)
-	fmt.Printf("augur run: %d scenario(s), %d run(s) each, session %q\n",
-		len(cfg.Scenarios), effectiveRuns(cfg.Runs, *runs), sess)
+	fmt.Printf("augur run: %d scenario(s), %d run(s) each, concurrency %d, session %q\n",
+		len(cfg.Scenarios), effectiveRuns(cfg.Runs, *runs), *concurrency, sess)
 
 	sum, runErr := runner.Run(ctx, cfg, runner.Options{
 		BaseURL:         baseURL,
 		Runs:            *runs,
 		Session:         sess,
 		ContinueOnError: *continueOnError,
+		Concurrency:     *concurrency,
 	})
 
 	// Shut the proxy down and surface any serve error that isn't the expected

@@ -19,6 +19,7 @@ func runAggregate(args []string) error {
 	pricingPath := fs.String("pricing", "pricing.yaml", "path to the pricing snapshot")
 	tcoPath := fs.String("tco", "", "derive pricing from a self-hosted TCO config instead of -pricing")
 	asJSON := fs.Bool("json", false, "emit the aggregation as JSON instead of a table")
+	normalizeModels := fs.Bool("normalize-models", false, "price a model absent from the snapshot via its longest dash-delimited prefix (e.g. gpt-4o-2024-08-06 -> gpt-4o); warns per fallback")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -38,11 +39,13 @@ func runAggregate(args []string) error {
 	if err != nil {
 		return err
 	}
+	pricing.PrefixFallback = *normalizeModels
 
 	res, err := aggregate.Aggregate(records, pricing)
 	if err != nil {
 		return err
 	}
+	warnModelAliases(os.Stderr, res.ModelAliases)
 
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)

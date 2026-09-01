@@ -10,6 +10,7 @@ package cost
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // tokensPerMtok is the denominator that turns a per-million-token price into a
@@ -132,18 +133,63 @@ func (p ModelPrice) Cost(u Usage) (float64, error) {
 type Pricing struct {
 	SnapshotDate string
 	Models       map[string]ModelPrice
+	// PrefixFallback, when true, lets Resolve match a model that is absent from
+	// the snapshot to the longest snapshot key that is a dash-delimited prefix of
+	// it — so a dated or suffixed variant (e.g. "gpt-4o-2024-08-06") falls back to
+	// its base entry ("gpt-4o") instead of failing. It is OFF by default because a
+	// silent fallback can mis-bill; callers that enable it should surface which
+	// models were normalized (Resolve reports the matched key so they can warn).
+	PrefixFallback bool
 }
 
-// Price returns the price for a model and whether it is known.
+// Price returns the exact price for a model and whether it is known. It does not
+// apply PrefixFallback — use Resolve for that.
 func (p Pricing) Price(model string) (ModelPrice, bool) {
 	mp, ok := p.Models[model]
 	return mp, ok
 }
 
-// Cost computes the cost of a single call for the named model. It wraps
-// ErrUnknownModel (so callers can errors.Is it) when the model is absent.
+// Resolve looks up the price for a model, returning the snapshot key it matched
+// (the canonical model), its price, and whether a match was found. An exact
+// match returns the model unchanged. When PrefixFallback is on and there is no
+// exact match, it returns the longest snapshot key that is a dash-delimited
+// prefix of the model (so callers can detect normalization by comparing the
+// returned canonical to the requested model).
+func (p Pricing) Resolve(model string) (canonical string, mp ModelPrice, ok bool) {
+	if mp, ok := p.Models[model]; ok {
+		return model, mp, true
+	}
+	if !p.PrefixFallback {
+		return "", ModelPrice{}, false
+	}
+	best := ""
+	for key := range p.Models {
+		if isModelPrefix(model, key) && len(key) > len(best) {
+			best = key
+		}
+	}
+	if best == "" {
+		return "", ModelPrice{}, false
+	}
+	return best, p.Models[best], true
+}
+
+// isModelPrefix reports whether key is a prefix of model at a dash boundary, so
+// "gpt-4o" matches "gpt-4o" and "gpt-4o-2024-08-06" but never "gpt-4omini". The
+// boundary rule keeps a base name from swallowing an unrelated one that merely
+// shares a leading substring.
+func isModelPrefix(model, key string) bool {
+	if !strings.HasPrefix(model, key) {
+		return false
+	}
+	return len(model) == len(key) || model[len(key)] == '-'
+}
+
+// Cost computes the cost of a single call for the named model. It applies
+// PrefixFallback via Resolve and wraps ErrUnknownModel (so callers can
+// errors.Is it) when no model matches.
 func (p Pricing) Cost(model string, u Usage) (float64, error) {
-	mp, ok := p.Models[model]
+	_, mp, ok := p.Resolve(model)
 	if !ok {
 		return 0, fmt.Errorf("%w: %q", ErrUnknownModel, model)
 	}
@@ -151,9 +197,10 @@ func (p Pricing) Cost(model string, u Usage) (float64, error) {
 }
 
 // Breakdown computes the per-component cost of a single call for the named
-// model, wrapping ErrUnknownModel when the model is absent.
+// model, applying PrefixFallback via Resolve and wrapping ErrUnknownModel when
+// no model matches.
 func (p Pricing) Breakdown(model string, u Usage) (Breakdown, error) {
-	mp, ok := p.Models[model]
+	_, mp, ok := p.Resolve(model)
 	if !ok {
 		return Breakdown{}, fmt.Errorf("%w: %q", ErrUnknownModel, model)
 	}

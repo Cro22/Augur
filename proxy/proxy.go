@@ -15,6 +15,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -35,7 +36,17 @@ import (
 const (
 	HeaderScenarioID = "X-Augur-Scenario-Id"
 	HeaderRunID      = "X-Augur-Run-Id"
+	// HeaderTimeout lets a single call override the proxy's default upstream
+	// timeout (a Go duration string, e.g. "300s" or "5m"). Reasoning models
+	// (o1/o3/r1) can legitimately run for minutes; a fast call can be capped
+	// tighter. It is Augur's header and is stripped before forwarding.
+	HeaderTimeout = "X-Augur-Timeout"
 )
+
+// DefaultTimeout is the upstream request deadline applied when neither a
+// -timeout flag nor a per-request X-Augur-Timeout header narrows it. It bounds
+// how long the proxy waits on the provider before giving up.
+const DefaultTimeout = 10 * time.Minute
 
 // nowFunc returns the current time. It is a field on Server (defaulting to
 // time.Now) so tests can stamp deterministic timestamps.
@@ -67,6 +78,13 @@ type Server struct {
 	// Set false to forward the request byte-for-byte.
 	InjectUsage bool
 
+	// Timeout bounds how long the proxy waits on the upstream provider for a
+	// single call, applied as a context deadline so client cancellation is still
+	// honored (a cancelled inbound request cancels the outbound one immediately).
+	// A per-call X-Augur-Timeout header overrides it; a value <= 0 means no
+	// proxy-imposed deadline. Defaults to DefaultTimeout from New.
+	Timeout time.Duration
+
 	mode     Mode
 	cassette *cassette.Cassette
 
@@ -81,7 +99,12 @@ type Server struct {
 // change mode.
 func New(upstream *url.URL, tracer *trace.Writer, client *http.Client) *Server {
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Minute}
+		// No client-level Timeout: the deadline is governed per-request by
+		// Server.Timeout (and the X-Augur-Timeout override) via the request
+		// context, so a slow reasoning model can be granted more time without
+		// re-constructing the client, and a cancelled inbound request cancels
+		// the outbound one at once.
+		client = &http.Client{}
 	}
 	return &Server{
 		upstream:    upstream,
@@ -89,6 +112,7 @@ func New(upstream *url.URL, tracer *trace.Writer, client *http.Client) *Server {
 		client:      client,
 		now:         time.Now,
 		InjectUsage: true,
+		Timeout:     DefaultTimeout,
 		seq:         make(map[string]int),
 		seen:        make(map[string]map[uint64]bool),
 	}
@@ -183,7 +207,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.InjectUsage {
 		fwdBody = maybeInjectIncludeUsage(r.URL.Path, reqBody)
 	}
-	outReq, err := s.buildUpstreamRequest(r, fwdBody)
+	// Bound the upstream call by the effective timeout (per-request header, else
+	// the server default), derived from the inbound request context so client
+	// cancellation still propagates. cancel is released once the response is
+	// fully handled — including the streaming path, which reads the body below.
+	ctx, cancel := s.upstreamContext(r)
+	defer cancel()
+	outReq, err := s.buildUpstreamRequest(ctx, r, fwdBody)
 	if err != nil {
 		http.Error(w, "augur proxy: building upstream request: "+err.Error(), http.StatusBadGateway)
 		return
@@ -287,16 +317,36 @@ func pickModel(reqModel, respModel string) string {
 	return respModel
 }
 
+// upstreamContext derives the context that bounds the outbound call. It starts
+// from the inbound request context (so a cancelled client cancels the provider
+// call) and layers a deadline: the X-Augur-Timeout header if present and
+// parseable, otherwise s.Timeout. A non-positive effective timeout means no
+// proxy-imposed deadline — the returned cancel is then a no-op but is always
+// safe (and required) to call.
+func (s *Server) upstreamContext(r *http.Request) (context.Context, context.CancelFunc) {
+	timeout := s.Timeout
+	if h := r.Header.Get(HeaderTimeout); h != "" {
+		if d, err := time.ParseDuration(h); err == nil && d > 0 {
+			timeout = d
+		}
+	}
+	if timeout <= 0 {
+		return context.WithCancel(r.Context())
+	}
+	return context.WithTimeout(r.Context(), timeout)
+}
+
 // buildUpstreamRequest clones the inbound request onto the upstream base URL,
 // preserving method, path, query, and headers (including Authorization) while
 // stripping Augur's own headers and Accept-Encoding (so Go's transport handles
-// compression transparently and we get a decoded body to parse usage from).
-func (s *Server) buildUpstreamRequest(r *http.Request, body []byte) (*http.Request, error) {
+// compression transparently and we get a decoded body to parse usage from). The
+// request carries ctx so its deadline and cancellation govern the call.
+func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, body []byte) (*http.Request, error) {
 	out := *s.upstream
 	out.Path = singleJoiningSlash(s.upstream.Path, r.URL.Path)
 	out.RawQuery = r.URL.RawQuery
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, out.String(), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, r.Method, out.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -304,6 +354,7 @@ func (s *Server) buildUpstreamRequest(r *http.Request, body []byte) (*http.Reque
 	stripHopByHop(req.Header)
 	req.Header.Del(HeaderScenarioID)
 	req.Header.Del(HeaderRunID)
+	req.Header.Del(HeaderTimeout)
 	// Let the Go transport negotiate and transparently decode compression so the
 	// response body we read (and parse usage from) is the decoded JSON.
 	req.Header.Del("Accept-Encoding")
